@@ -1,0 +1,8 @@
+pandas
+numpy
+scipy
+matplotlib
+dash
+plotly
+statsmodels
+hmmlearn

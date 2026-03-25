@@ -1,0 +1,88 @@
+/*
+  Dark theme overrides for Dash Dropdown (react-select).
+  Applied to both the main dashboard and the Monte Carlo dashboard.
+*/
+
+/* ── Dropdown container / control ─────────────────────────────────────────── */
+.Select-control,
+.VirtualizedSelectOption,
+.react-select__control {
+    background-color: #1a1a2e !important;
+    border-color:     #0f3460 !important;
+    color:            #e0e0e0 !important;
+}
+
+/* ── Selected value text ──────────────────────────────────────────────────── */
+.Select-value-label,
+.Select-single-value,
+.react-select__single-value {
+    color: #222222 !important;
+}
+
+/* ── Placeholder text ─────────────────────────────────────────────────────── */
+.Select-placeholder,
+.react-select__placeholder {
+    color: #555555 !important;
+}
+
+/* ── Input text while typing ──────────────────────────────────────────────── */
+.Select-input input,
+.react-select__input input {
+    color: #222222 !important;
+}
+
+/* ── Dropdown menu (the open list) ───────────────────────────────────────── */
+.Select-menu-outer,
+.react-select__menu {
+    background-color: #1a1a2e !important;
+    border:           1px solid #0f3460 !important;
+    box-shadow:       0 4px 16px rgba(0,0,0,0.6) !important;
+    z-index:          9999 !important;
+}
+
+.Select-menu,
+.react-select__menu-list {
+    background-color: #1a1a2e !important;
+}
+
+/* ── Individual options ───────────────────────────────────────────────────── */
+.VirtualizedSelectOption,
+.Select-option,
+.react-select__option {
+    background-color: #1a1a2e !important;
+    color:            #e0e0e0 !important;
+    font-size:        12px;
+    cursor:           pointer;
+}
+
+/* ── Hovered / focused option ─────────────────────────────────────────────── */
+.VirtualizedSelectFocusedOption,
+.Select-option.is-focused,
+.react-select__option--is-focused {
+    background-color: #0f3460 !important;
+    color:            #00d4ff !important;
+}
+
+/* ── Selected option ──────────────────────────────────────────────────────── */
+.Select-option.is-selected,
+.react-select__option--is-selected {
+    background-color: #0f3460 !important;
+    color:            #00d4ff !important;
+    font-weight:      bold;
+}
+
+/* ── Arrow indicator ──────────────────────────────────────────────────────── */
+.Select-arrow-zone,
+.react-select__dropdown-indicator {
+    color: #888888 !important;
+}
+.Select-arrow-zone:hover,
+.react-select__dropdown-indicator:hover {
+    color: #00d4ff !important;
+}
+
+/* ── Clear button ─────────────────────────────────────────────────────────── */
+.Select-clear-zone,
+.react-select__clear-indicator {
+    color: #888888 !important;
+}
