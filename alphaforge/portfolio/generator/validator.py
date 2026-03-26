@@ -4,8 +4,9 @@ validator.py — Drawdown validation after rescaling (Step 4).
 Takes a ScaledResult (already rescaled to fit the daily loss limit) and checks
 whether the full equity curve stays within the total drawdown limit.
 
-If it passes, returns a ValidPortfolio with full metrics pre-computed.
-If it fails, returns None.
+Always returns a ValidPortfolio — never None.
+dd_failed=True means the portfolio breached the total-DD limit after scaling;
+it is kept and displayed in the dashboard (the limit is conservative).
 """
 
 from __future__ import annotations
@@ -22,12 +23,13 @@ from alphaforge.metrics.metrics import compute_metrics
 
 @dataclass
 class ValidPortfolio:
-    """A portfolio that has passed all filters, weighting, rescaling, and DD validation."""
+    """A weighted, rescaled portfolio with full metrics. Always created — never None."""
 
     scaled          : ScaledResult
     max_drawdown_usd: float
     max_drawdown_pct: float
     metrics         : dict                    # full compute_metrics output on scaled portfolio
+    dd_failed       : bool = False            # True if total-DD exceeded after scaling
     stress          : object | None = None    # filled later by mae_stress (StressResult)
 
     # ── Convenience pass-throughs ─────────────────────────────────────────────
@@ -101,30 +103,29 @@ def _compute_drawdown(portfolio_df: pd.DataFrame, initial_capital: float) -> tup
 def validate(
     scaled: ScaledResult,
     config: PortfolioConfig,
-) -> ValidPortfolio | None:
+) -> ValidPortfolio:
     """
-    Validate a rescaled portfolio against the total drawdown limit.
+    Check a rescaled portfolio against the total drawdown limit.
 
-    Computes the full equity curve after rescaling and rejects the portfolio
-    if max drawdown exceeds config.total_drawdown_limit_usd.
+    Always returns a ValidPortfolio — never None.
+    Sets dd_failed=True if max drawdown exceeds config.total_drawdown_limit_usd,
+    so the portfolio is still visible in the dashboard while the breach is flagged.
 
     Args:
         scaled : ScaledResult from the rescaling step
         config : PortfolioConfig with total_drawdown_limit
 
     Returns:
-        ValidPortfolio if it passes, None if it fails.
+        ValidPortfolio (dd_failed=True if total-DD limit breached)
     """
     dd_usd, dd_pct = _compute_drawdown(scaled.portfolio_df, config.account_balance)
-
-    if dd_usd > config.total_drawdown_limit_usd:
-        return None
-
-    metrics = compute_metrics(scaled.portfolio_df, initial_capital=config.account_balance)
+    dd_failed = dd_usd > config.total_drawdown_limit_usd
+    metrics   = compute_metrics(scaled.portfolio_df, initial_capital=config.account_balance)
 
     return ValidPortfolio(
         scaled           = scaled,
         max_drawdown_usd = dd_usd,
         max_drawdown_pct = dd_pct,
         metrics          = metrics,
+        dd_failed        = dd_failed,
     )

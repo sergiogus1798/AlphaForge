@@ -1,427 +1,686 @@
 """
-dashboard.py — Portfolio Explorer dashboard.
+dashboard.py — Portfolio Explorer dashboard (matplotlib, local windows).
 
-Two-tab Dash app for browsing and comparing generated portfolios.
+Two windows:
+  Window 1 — Combination Explorer:
+    Navigate through the top-N strategy combinations (< Prev / Next >).
+    Left panel  : scrollable visual tables (mouse-wheel) — strategies+asset,
+                  weights, risk/trade (+ total), scale, DD status.
+    Right top   : 4 equity curves on the same axes (one colour per method).
+                  DD-failed methods shown dashed with reduced opacity.
+    Right bottom: metrics comparison table (rows = metrics, cols = 4 methods).
 
-Tab 1 — Portfolio View:
-  Dropdown to select a portfolio (sorted by Sharpe).
-  Left panel : strategies, weights, risk/trade, scale factor, critical day, MAE stress.
-  Right panel: equity curve (before/after rescaling + red critical day dot) + drawdown.
-
-Tab 2 — Ranking:
-  Sortable table of all valid portfolios with key metrics + MAE stress status.
+  Window 2 — Ranking overview:
+    One row per combination, columns show each method's Sharpe (coloured by method).
 """
 
 from __future__ import annotations
 
-import pandas as pd
 import numpy as np
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-import dash
-from dash import dcc, html, Input, Output, dash_table
+import pandas as pd
+import matplotlib.pyplot as plt
+import matplotlib.gridspec as gridspec
+from matplotlib.patches import Rectangle
+from matplotlib.widgets import Button
 
 from alphaforge.portfolio.config import PortfolioConfig
-from alphaforge.portfolio.generator.validator import ValidPortfolio
+from alphaforge.portfolio.generator.combo_result import (
+    CombinationResult, METHODS, METHOD_COLORS, METHOD_LABELS,
+)
 
 
-# ── Theme ─────────────────────────────────────────────────────────────────────
+# ── Theme ──────────────────────────────────────────────────────────────────────
 
-BG      = "#0f1117"
-PANEL   = "#1a1a2e"
-BORDER  = "#2a2a4a"
-CYAN    = "#00d4ff"
-AMBER   = "#f0a500"
-GREEN   = "#2ecc71"
-RED     = "#e74c3c"
-TEXT    = "#e0e0e0"
-DIM     = "#888888"
-BEFORE  = "#4a4a7a"
+BG       = "#0f1117"
+AX_BG    = "#1a1a2e"
+BORDER   = "#2a2a4a"
+CYAN     = "#00d4ff"
+AMBER    = "#f0a500"
+GREEN    = "#2ecc71"
+RED      = "#e74c3c"
+TEXT     = "#e0e0e0"
+DIM      = "#888888"
+ROW_A    = "#0d1020"
+ROW_B    = "#111828"
+SEC_BG   = "#1e2240"
+COL_HDR  = "#141830"
+
+# Full-length names for metrics table columns
+_METHOD_FULL = {
+    "equal":        "Equal Weight",
+    "min_variance": "Min Variance",
+    "risk_parity":  "Risk Parity",
+    "hrp":          "HRP",
+}
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# ── Helpers ────────────────────────────────────────────────────────────────────
 
-def _equity_curve(portfolio_df: pd.DataFrame) -> pd.Series:
+def _equity(portfolio_df: pd.DataFrame) -> pd.Series:
     daily = (
         portfolio_df
         .groupby(portfolio_df["Close time"].dt.date)["Profit/Loss"]
         .sum()
     )
-    date_range = pd.date_range(daily.index.min(), daily.index.max(), freq="D")
-    return daily.reindex(date_range, fill_value=0.0).cumsum()
-
-
-def _drawdown_pct(equity: pd.Series, initial_capital: float) -> pd.Series:
-    total = initial_capital + equity
-    peak  = total.cummax()
-    return ((peak - total) / peak * 100)
+    dr = pd.date_range(daily.index.min(), daily.index.max(), freq="D")
+    return daily.reindex(dr, fill_value=0.0).cumsum()
 
 
 def _short(name: str) -> str:
     return name.split("/")[-1]
 
 
-# ── Portfolio label for dropdown ──────────────────────────────────────────────
+def _asset(name: str, strategies: dict) -> str:
+    df = strategies.get(name)
+    if df is not None and "Symbol" in df.columns:
+        try:
+            return str(df["Symbol"].mode()[0])
+        except Exception:
+            pass
+    parts = name.split("/")
+    return parts[-2] if len(parts) >= 2 else "?"
 
-def _portfolio_label(vp: ValidPortfolio, rank: int) -> str:
-    method = vp.method.replace("_", " ").title()
-    n      = len(vp.combination)
-    stress = ""
-    if vp.stress is not None:
-        stress = " ✓ MAE" if vp.stress.passed else " ✗ MAE"
-    return f"#{rank}  {method} | {n} strats | Sharpe {vp.sharpe:.2f}{stress}"
+
+def _style(ax, hide_ticks: bool = False) -> None:
+    ax.set_facecolor(AX_BG)
+    for sp in ax.spines.values():
+        sp.set_edgecolor(BORDER)
+    ax.tick_params(colors=TEXT)
+    if hide_ticks:
+        ax.set_xticks([])
+        ax.set_yticks([])
 
 
-# ── Equity + Drawdown figure ──────────────────────────────────────────────────
+# ── Left info panel — data-coordinate drawing (enables scroll) ─────────────────
 
-def _build_chart(vp: ValidPortfolio, initial_capital: float) -> go.Figure:
-    fig = make_subplots(
-        rows=2, cols=1,
-        shared_xaxes=True,
-        row_heights=[0.65, 0.35],
-        vertical_spacing=0.04,
+_INFO_VISIBLE = 24     # rows shown at once; scroll reveals the rest
+
+# Column layout in data-x space (xlim = 0-100)
+# Reserve x=96-100 for the scroll track
+_CX  = [1,  44,  57,  70,  83]    # left edge of each column
+_CW  = [42,  12,  12,  12,  12]   # width of each column
+_TRACK_X = 96.5
+_TRACK_W = 3.0
+
+
+def _dp(ax, x, y, w, h, facecolor, edgecolor=None, lw=0.4, zorder=1) -> None:
+    """Add a Rectangle patch in data coordinates."""
+    ax.add_patch(Rectangle(
+        (x, y), w, h,
+        facecolor=facecolor,
+        edgecolor=edgecolor or "none",
+        linewidth=lw,
+        zorder=zorder,
+        clip_on=True,
+    ))
+
+
+def _dt(ax, x, y, text, color, fontsize=7.4, ha="left", bold=False,
+        va="center") -> None:
+    """Add text in data coordinates."""
+    ax.text(
+        x, y, text,
+        color=color,
+        fontsize=fontsize,
+        ha=ha, va=va,
+        fontfamily="monospace",
+        fontweight="bold" if bold else "normal",
+        zorder=2,
+        clip_on=True,
     )
 
-    # Before-scaling equity (divide rescaled P&L by scale factor)
-    before_df = vp.portfolio_df.copy()
-    if vp.scale_factor != 0:
-        before_df["Profit/Loss"] = before_df["Profit/Loss"] / vp.scale_factor
-    eq_before = _equity_curve(before_df)
-    eq_after  = _equity_curve(vp.portfolio_df)
-    dd        = _drawdown_pct(eq_after, initial_capital)
 
-    x_before = eq_before.index.astype(str).tolist()
-    x_after  = eq_after.index.astype(str).tolist()
+def _draw_info(
+    ax, cr: CombinationResult, rank: int, n_total: int,
+    strategies: dict,
+) -> tuple[int, object | None]:
+    """
+    Draw the info panel using data coordinates so mouse-wheel scrolling works.
 
-    # Before (dashed, muted)
-    fig.add_trace(go.Scatter(
-        x=x_before, y=eq_before.values.tolist(),
-        mode="lines", name="Before rescaling",
-        line=dict(color=BEFORE, width=1.5, dash="dash"),
-        opacity=0.7,
-    ), row=1, col=1)
+    Returns (n_rows, thumb_patch) so the caller can update the thumb on scroll.
+    """
+    ax.cla()
+    ax.set_facecolor(AX_BG)
+    ax.set_xlim(0, 100)
+    ax.set_xticks([])
+    ax.set_yticks([])
+    for sp in ax.spines.values():
+        sp.set_visible(False)
 
-    # After (solid, bright)
-    fig.add_trace(go.Scatter(
-        x=x_after, y=eq_after.values.tolist(),
-        mode="lines", name="After rescaling",
-        line=dict(color=CYAN, width=2),
-    ), row=1, col=1)
+    # ── Build row list ─────────────────────────────────────────────────────────
+    rows: list[tuple[str, object]] = []
+    rows.append(("title",   None))
+    rows.append(("rdd",     None))
+    rows.append(("gap",     None))
+    rows.append(("sec",     "STRATEGIES"))
+    for name in cr.combination:
+        rows.append(("strategy", name))
+    rows.append(("gap",     None))
+    rows.append(("col_hdr", None))
+    rows.append(("sec",     "WEIGHTS"))
+    for name in cr.combination:
+        rows.append(("w_row", name))
+    rows.append(("gap",     None))
+    rows.append(("sec",     "RISK / TRADE  ($)"))
+    for name in cr.combination:
+        rows.append(("r_row", name))
+    rows.append(("r_total", None))
+    rows.append(("gap",     None))
+    rows.append(("sec",     "SCALE FACTOR"))
+    rows.append(("scale",   None))
+    rows.append(("gap",     None))
+    rows.append(("sec",     "DD STATUS"))
+    rows.append(("dd",      None))
 
-    # Critical day dot
-    crit_ts  = str(pd.Timestamp(vp.critical_day).date())
-    crit_val = eq_after.get(pd.Timestamp(vp.critical_day), None)
-    if crit_val is not None:
-        fig.add_trace(go.Scatter(
-            x=[crit_ts], y=[float(crit_val)],
-            mode="markers",
-            name=f"Critical day ({vp.critical_day})",
-            marker=dict(color=RED, size=10, symbol="circle"),
-            hovertemplate=(
-                f"<b>Critical Day</b><br>"
-                f"Date: {vp.critical_day}<br>"
-                f"Daily loss: ${vp.worst_day_loss:,.2f}<extra></extra>"
-            ),
-        ), row=1, col=1)
+    n_rows = len(rows)
 
-    # MAE stress critical day dot (if available)
-    if vp.stress is not None:
-        mae_ts  = str(pd.Timestamp(vp.stress.critical_day_mae).date())
-        mae_val = eq_after.get(pd.Timestamp(vp.stress.critical_day_mae), None)
-        if mae_val is not None:
-            fig.add_trace(go.Scatter(
-                x=[mae_ts], y=[float(mae_val)],
-                mode="markers",
-                name=f"MAE critical ({vp.stress.critical_day_mae})",
-                marker=dict(color=AMBER, size=10, symbol="diamond"),
-                hovertemplate=(
-                    f"<b>MAE Critical Day</b><br>"
-                    f"Date: {vp.stress.critical_day_mae}<br>"
-                    f"Daily loss (MAE): ${vp.stress.worst_day_loss_mae:,.2f}<extra></extra>"
-                ),
-            ), row=1, col=1)
+    # Row i occupies y ∈ [n_rows-i-1,  n_rows-i)  (top row first)
+    def _yb(i: int) -> float:   # bottom y of row i
+        return float(n_rows - i - 1)
 
-    # Drawdown
-    fig.add_trace(go.Scatter(
-        x=x_after, y=dd.values.tolist(),
-        mode="lines", name="Drawdown %",
-        line=dict(color=RED, width=1.5),
-        fill="tozeroy",
-        fillcolor="rgba(231,76,60,0.15)",
-        showlegend=False,
-    ), row=2, col=1)
+    def _ym(i: int) -> float:   # mid y of row i
+        return _yb(i) + 0.5
 
-    fig.add_hline(
-        y=0, line_color=BORDER, line_width=1, row=1, col=1,
-    )
+    # ── Draw rows ──────────────────────────────────────────────────────────────
+    for i, (rtype, data) in enumerate(rows):
+        yb = _yb(i)
+        ym = _ym(i)
 
-    fig.update_layout(
-        paper_bgcolor=BG,
-        plot_bgcolor=PANEL,
-        font=dict(color=TEXT, size=11),
-        legend=dict(
-            bgcolor=PANEL, bordercolor=BORDER, borderwidth=1,
-            font=dict(size=10), orientation="h", y=1.04,
-        ),
-        margin=dict(l=60, r=20, t=30, b=40),
-        hovermode="x unified",
-    )
-    fig.update_xaxes(gridcolor=BORDER, linecolor=BORDER, zeroline=False)
-    fig.update_yaxes(gridcolor=BORDER, linecolor=BORDER, zeroline=False)
-    fig.update_yaxes(title_text="Cumulative P&L ($)", tickprefix="$", row=1, col=1)
-    fig.update_yaxes(title_text="Drawdown (%)", ticksuffix="%", autorange="reversed", row=2, col=1)
+        if rtype == "title":
+            _dp(ax, 0, yb, 100, 1, "#141a30")
+            _dt(ax, 2, ym, f"Combination #{rank} / {n_total}",
+                CYAN, fontsize=8.2, bold=True)
 
-    return fig
+        elif rtype == "rdd":
+            _dp(ax, 0, yb, 100, 1, "#0f1220")
+            _dt(ax, 3, ym, f"  Raw Return/DD   {cr.raw_return_dd:.3f}",
+                TEXT, fontsize=7.4)
 
+        elif rtype == "gap":
+            pass
 
-# ── Info panel (left side) ────────────────────────────────────────────────────
+        elif rtype == "sec":
+            _dp(ax, 0, yb, 100, 1, SEC_BG)
+            _dt(ax, 2, ym, data, AMBER, fontsize=7.0, bold=True)
 
-def _info_panel(vp: ValidPortfolio) -> html.Div:
-    method = vp.method.replace("_", " ").title()
-    m      = vp.metrics
+        elif rtype == "strategy":
+            name = data
+            bg = ROW_A if i % 2 == 0 else ROW_B
+            _dp(ax, 0, yb, 100, 1, bg)
+            short = _short(name)
+            asset = _asset(name, strategies)
+            _dt(ax, _CX[0] + 2, ym, f"  •  {short}", TEXT, fontsize=7.2)
+            # Asset badge — patch at z=2, text at z=3 so text sits on top
+            bx = 70
+            _dp(ax, bx, yb + 0.12, 24, 0.76, "#1e3050",
+                edgecolor="#2060a0", lw=0.5, zorder=2)
+            ax.text(bx + 12, ym, asset, color=CYAN, fontsize=7.0,
+                    ha="center", va="center", fontfamily="monospace",
+                    zorder=3, clip_on=True)
 
-    def row(label, value, color=TEXT):
-        return html.Tr([
-            html.Td(label, style={"color": DIM, "padding": "3px 8px", "fontSize": "12px"}),
-            html.Td(value, style={"color": color, "padding": "3px 8px", "fontSize": "12px", "textAlign": "right"}),
-        ])
+        elif rtype == "col_hdr":
+            _dp(ax, 0, yb, _CX[0] + _CW[0], 1, COL_HDR)
+            for k, m in enumerate(METHODS):
+                cx, cw = _CX[k + 1], _CW[k + 1]
+                _dp(ax, cx, yb, cw, 1, COL_HDR,
+                    edgecolor=BORDER, lw=0.5)
+                _dt(ax, cx + cw / 2, ym, METHOD_LABELS[m],
+                    METHOD_COLORS[m], fontsize=7.2, ha="center", bold=True)
 
-    # Strategies + weights + risk/trade
-    strat_rows = []
-    for name in vp.combination:
-        w   = vp.weights[name]
-        rpt = vp.risk_per_trade[name]
-        strat_rows.append(html.Tr([
-            html.Td(_short(name), style={"color": CYAN,  "padding": "2px 8px", "fontSize": "11px"}),
-            html.Td(f"{w:.3f}",   style={"color": TEXT,  "padding": "2px 8px", "fontSize": "11px", "textAlign": "right"}),
-            html.Td(f"${rpt:,.0f}", style={"color": AMBER, "padding": "2px 8px", "fontSize": "11px", "textAlign": "right"}),
-        ]))
+        elif rtype in ("w_row", "r_row"):
+            name = data
+            bg = ROW_A if i % 2 == 0 else ROW_B
+            _dp(ax, 0, yb, _CX[0] + _CW[0], 1, bg)
+            _dt(ax, _CX[0] + 1, ym, _short(name)[:18], TEXT, fontsize=7.2)
+            for k, m in enumerate(METHODS):
+                cx, cw = _CX[k + 1], _CW[k + 1]
+                vp = cr.portfolios.get(m)
+                if vp:
+                    if rtype == "w_row":
+                        val = f"{vp.weights.get(name, 0):.3f}"
+                    else:
+                        val = f"{vp.risk_per_trade.get(name, 0):,.0f}"
+                    fg = TEXT
+                else:
+                    val, fg = "—", DIM
+                _dp(ax, cx, yb, cw, 1, bg, edgecolor=BORDER, lw=0.3)
+                _dt(ax, cx + cw / 2, ym, val, fg,
+                    fontsize=7.2, ha="center")
 
-    # MAE stress block
-    if vp.stress is not None:
-        s = vp.stress
-        stress_color  = GREEN if s.passed else RED
-        stress_label  = "PASSED" if s.passed else "FAILED"
-        stress_block  = [
-            html.Hr(style={"borderColor": BORDER, "margin": "8px 0"}),
-            html.P("MAE Stress Test", style={"color": DIM, "fontSize": "11px", "margin": "4px 0"}),
-            html.Table([
-                row("Status",          stress_label,                       stress_color),
-                row("Worst day (MAE)", f"${s.worst_day_loss_mae:,.2f}",   RED if s.worst_day_loss_mae < 0 else GREEN),
-                row("Max DD (MAE)",    f"${s.max_drawdown_usd_mae:,.0f}"),
-                row("Max DD% (MAE)",   f"{s.max_drawdown_pct_mae:.2f}%"),
-                row("MAE coverage",    f"{s.mae_coverage_pct:.0f}% of trades"),
-            ], style={"width": "100%", "borderCollapse": "collapse"}),
-        ]
-    else:
-        stress_block = [html.P("MAE stress not run yet.", style={"color": DIM, "fontSize": "11px"})]
+        elif rtype == "r_total":
+            bg = "#1a2535"
+            _dp(ax, 0, yb, 100, 1, bg)
+            _dp(ax, _CX[0], yb, _CW[0], 1, bg, edgecolor=BORDER, lw=0.3)
+            _dt(ax, _CX[0] + 1, ym, "TOTAL",
+                AMBER, fontsize=7.2, bold=True)
+            for k, m in enumerate(METHODS):
+                cx, cw = _CX[k + 1], _CW[k + 1]
+                vp = cr.portfolios.get(m)
+                if vp:
+                    total = sum(vp.risk_per_trade.values())
+                    val, fg = f"{total:,.0f}", CYAN
+                else:
+                    val, fg = "—", DIM
+                _dp(ax, cx, yb, cw, 1, bg, edgecolor=BORDER, lw=0.3)
+                _dt(ax, cx + cw / 2, ym, val, fg,
+                    fontsize=7.2, ha="center", bold=True)
 
-    return html.Div([
-        html.P(f"Method: {method}", style={"color": CYAN, "fontWeight": "bold", "marginBottom": "4px"}),
+        elif rtype == "scale":
+            bg = ROW_A
+            _dp(ax, 0, yb, 100, 1, bg)
+            for k, m in enumerate(METHODS):
+                cx, cw = _CX[k + 1], _CW[k + 1]
+                vp = cr.portfolios.get(m)
+                val = f"×{vp.scale_factor:.3f}" if vp else "—"
+                fg  = TEXT if vp else DIM
+                _dp(ax, cx, yb, cw, 1, bg, edgecolor=BORDER, lw=0.3)
+                _dt(ax, cx + cw / 2, ym, val, fg,
+                    fontsize=7.2, ha="center")
 
-        html.Table([
-            html.Tr([
-                html.Th("Strategy",   style={"color": DIM, "fontSize": "11px", "padding": "2px 8px", "textAlign": "left"}),
-                html.Th("Weight",     style={"color": DIM, "fontSize": "11px", "padding": "2px 8px", "textAlign": "right"}),
-                html.Th("Risk/Trade", style={"color": DIM, "fontSize": "11px", "padding": "2px 8px", "textAlign": "right"}),
-            ])
-        ] + strat_rows, style={"width": "100%", "borderCollapse": "collapse", "marginBottom": "8px"}),
+        elif rtype == "dd":
+            _dp(ax, 0, yb, 100, 1, ROW_B)
+            for k, m in enumerate(METHODS):
+                cx, cw = _CX[k + 1], _CW[k + 1]
+                vp = cr.portfolios.get(m)
+                if vp is None:
+                    val, fg, cbg = "—",    DIM,   ROW_B
+                elif vp.dd_failed:
+                    val, fg, cbg = "FAIL", RED,   "#2a0808"
+                else:
+                    val, fg, cbg = "PASS", GREEN, "#082a12"
+                _dp(ax, cx, yb, cw, 1, cbg, edgecolor=BORDER, lw=0.5)
+                _dt(ax, cx + cw / 2, ym, val, fg,
+                    fontsize=7.2, ha="center", bold=True)
 
-        html.Hr(style={"borderColor": BORDER, "margin": "8px 0"}),
+    # ── Set initial ylim (show topmost rows) ───────────────────────────────────
+    ax.set_ylim(max(0, n_rows - _INFO_VISIBLE), n_rows)
 
-        html.Table([
-            row("Scale factor",    f"×{vp.scale_factor:.4f}"),
-            row("Critical day",    str(vp.critical_day)),
-            row("Worst day loss",  f"${vp.worst_day_loss:,.2f}", RED),
-            html.Tr([html.Td(colSpan=2)]),
-            row("Total profit",    f"${m['total_profit']:,.0f}", GREEN),
-            row("CAGR",            f"{m['cagr']:.2f}%"),
-            row("Sharpe",          f"{m['sharpe_ratio']:.3f}", CYAN),
-            row("Profit factor",   f"{m['profit_factor']:.2f}"),
-            row("Return/DD",       f"{m['return_dd_ratio']:.2f}"),
-            row("Win rate",        f"{m['winning_percentage']:.1f}%"),
-            row("Max DD ($)",      f"${m['drawdown']:,.0f}", RED),
-            row("Max DD (%)",      f"{m['pct_drawdown']:.2f}%", RED),
-            row("Avg trade",       f"${m['average_trade']:.2f}"),
-            row("Num trades",      f"{m['num_trades']:,}"),
-        ], style={"width": "100%", "borderCollapse": "collapse"}),
-
-        *stress_block,
-    ], style={"padding": "12px"})
-
-
-# ── Ranking table ─────────────────────────────────────────────────────────────
-
-def _ranking_data(portfolios: list[ValidPortfolio]) -> list[dict]:
-    rows = []
-    for i, vp in enumerate(portfolios, 1):
-        m   = vp.metrics
-        stress_ok = (
-            "✓" if (vp.stress and vp.stress.passed) else
-            "✗" if (vp.stress and not vp.stress.passed) else "—"
+    # ── Scroll track + thumb ───────────────────────────────────────────────────
+    thumb = None
+    if n_rows > _INFO_VISIBLE:
+        # Track
+        _dp(ax, _TRACK_X, 0, _TRACK_W, n_rows,
+            "#0a0d1a", edgecolor=BORDER, lw=0.5, zorder=5)
+        # Thumb (initial position = top)
+        thumb = Rectangle(
+            (_TRACK_X, n_rows - _INFO_VISIBLE),
+            _TRACK_W, _INFO_VISIBLE,
+            facecolor=AMBER, edgecolor="none",
+            linewidth=0, zorder=6, clip_on=True,
+            alpha=0.7,
         )
-        rows.append({
-            "Rank":          i,
-            "Method":        vp.method.replace("_", " ").title(),
-            "N":             len(vp.combination),
-            "Strategies":    " | ".join(_short(n) for n in vp.combination),
-            "Sharpe":        round(m["sharpe_ratio"], 3),
-            "CAGR %":        round(m["cagr"], 2),
-            "Profit ($)":    round(m["total_profit"], 0),
-            "Max DD %":      round(m["pct_drawdown"], 2),
-            "Profit Factor": round(m["profit_factor"], 2),
-            "Return/DD":     round(m["return_dd_ratio"], 2),
-            "Win %":         round(m["winning_percentage"], 1),
-            "Scale ×":       round(vp.scale_factor, 4),
-            "MAE Stress":    stress_ok,
-        })
-    return rows
+        ax.add_patch(thumb)
+
+        # Hint label
+        _dt(ax, _TRACK_X + _TRACK_W / 2, -0.6,
+            "↕", DIM, fontsize=8, ha="center")
+
+    return n_rows, thumb
 
 
-# ── App builder ───────────────────────────────────────────────────────────────
+# ── Equity curves ──────────────────────────────────────────────────────────────
 
-def run_portfolio_dashboard(
-    portfolios: list[ValidPortfolio],
-    config: PortfolioConfig,
-    port: int = 8060,
+def _draw_equity(ax, cr: CombinationResult) -> None:
+    ax.cla()
+    _style(ax)
+
+    for m in METHODS:
+        vp = cr.portfolios.get(m)
+        if vp is None:
+            continue
+        eq    = _equity(vp.portfolio_df)
+        label = f"{METHOD_LABELS[m]}  Sharpe {vp.sharpe:.2f}"
+        if vp.dd_failed:
+            ax.plot(eq.index, eq.values,
+                    color=METHOD_COLORS[m], lw=1.5, ls="--", alpha=0.55,
+                    label=f"{label}  [DD>limit]")
+        else:
+            ax.plot(eq.index, eq.values,
+                    color=METHOD_COLORS[m], lw=2,
+                    label=label)
+
+    ax.axhline(0, color=BORDER, lw=0.8)
+
+    # Y-axis label close to axis, ticks facing inward
+    ax.set_ylabel("Cumul. P&L ($)", color=TEXT, fontsize=8.5, labelpad=4)
+    ax.yaxis.set_label_coords(-0.03, 0.5)
+    ax.tick_params(axis="y", direction="in", pad=3, colors=TEXT)
+    ax.tick_params(axis="x", colors=TEXT)
+
+    ax.legend(fontsize=7.5, facecolor=AX_BG, labelcolor=TEXT,
+              loc="upper left", framealpha=0.8)
+    ax.grid(True, color=BORDER, lw=0.5)
+    ax.set_ylim(bottom=0)
+    ax.margins(x=0.01)
+    plt.setp(ax.get_xticklabels(), visible=False)
+
+
+# ── Metrics comparison table ───────────────────────────────────────────────────
+
+_METRIC_ROWS = [
+    ("Sharpe",       "sharpe_ratio",        "{:.3f}",  True),
+    ("CAGR %",       "cagr",                "{:.2f}",  True),
+    ("Profit ($)",   "total_profit",        "{:,.0f}", True),
+    ("Return / DD",  "return_dd_ratio",     "{:.2f}",  True),
+    ("Win %",        "winning_percentage",  "{:.1f}",  True),
+    ("Pft Factor",   "profit_factor",       "{:.2f}",  True),
+    ("Max DD %",     "pct_drawdown",        "{:.2f}",  False),
+    ("Max DD ($)",   "drawdown",            "{:,.0f}", False),
+    ("Num Trades",   "num_trades",          "{:,.0f}", True),
+    ("DD Status",    "__dd__",              "{}",      None),
+    ("MAE Stress",   "__mae__",             "{}",      None),
+]
+
+
+def _draw_metrics(ax, cr: CombinationResult) -> None:
+    ax.cla()
+    ax.set_facecolor(BG)
+    ax.axis("off")
+
+    col_labels  = ["Metric"] + [_METHOD_FULL[m] for m in METHODS]
+    rows_data   = []
+    cell_colors = []
+    text_colors = []
+
+    for label, key, fmt, higher_better in _METRIC_ROWS:
+        row   = [label]
+        c_row = [AX_BG]
+        t_row = [DIM]
+
+        if key == "__dd__":
+            for m in METHODS:
+                vp = cr.portfolios.get(m)
+                if vp is None:
+                    row.append("—");    c_row.append(AX_BG);    t_row.append(DIM)
+                elif vp.dd_failed:
+                    row.append("FAIL"); c_row.append("#2a0808"); t_row.append(RED)
+                else:
+                    row.append("PASS"); c_row.append("#082a12"); t_row.append(GREEN)
+
+        elif key == "__mae__":
+            for m in METHODS:
+                vp = cr.portfolios.get(m)
+                if vp is None or vp.stress is None:
+                    row.append("—");    c_row.append(AX_BG);    t_row.append(DIM)
+                elif vp.stress.passed:
+                    row.append("PASS"); c_row.append("#082a12"); t_row.append(GREEN)
+                else:
+                    row.append("FAIL"); c_row.append("#2a0808"); t_row.append(RED)
+
+        else:
+            vals = []
+            for m in METHODS:
+                vp = cr.portfolios.get(m)
+                if vp is None:
+                    row.append("—"); c_row.append(AX_BG); t_row.append(DIM)
+                    vals.append(None)
+                else:
+                    v = vp.metrics.get(key, 0.0)
+                    row.append(fmt.format(v))
+                    c_row.append(AX_BG)
+                    t_row.append(TEXT)
+                    vals.append(v)
+
+            valid_vals = [(i, v) for i, v in enumerate(vals) if v is not None]
+            if valid_vals and higher_better is not None:
+                best_i = (max if higher_better else min)(valid_vals, key=lambda x: x[1])[0]
+                c_row[best_i + 1] = "#0e2535"
+                t_row[best_i + 1] = CYAN
+
+        rows_data.append(row)
+        cell_colors.append(c_row)
+        text_colors.append(t_row)
+
+    tbl = ax.table(
+        cellText=rows_data,
+        colLabels=col_labels,
+        loc="center",
+        cellLoc="center",
+    )
+    tbl.auto_set_font_size(False)
+    tbl.set_fontsize(8.5)
+    tbl.auto_set_column_width(range(len(col_labels)))
+    tbl.scale(1, 1.35)
+
+    for (r, c), cell in tbl.get_celld().items():
+        cell.set_edgecolor(BORDER)
+        if r == 0:
+            if c > 0:
+                m  = METHODS[c - 1]
+                vp = cr.portfolios.get(m)
+                tc = METHOD_COLORS[m] if (vp and not vp.dd_failed) else DIM
+            else:
+                tc = CYAN
+            cell.set_facecolor(COL_HDR)
+            cell.get_text().set_color(tc)
+            cell.get_text().set_fontweight("bold")
+        else:
+            bg       = ROW_A if r % 2 == 0 else ROW_B
+            override = cell_colors[r - 1][c]
+            cell.set_facecolor(override if override != AX_BG else bg)
+            cell.get_text().set_color(text_colors[r - 1][c])
+
+
+# ── Full render ────────────────────────────────────────────────────────────────
+
+def _render(
+    fig, ax_info, ax_eq, ax_metrics, nav_label,
+    cr: CombinationResult, idx: int, n: int,
+    strategies: dict, scroll_info: dict,
 ) -> None:
-    """
-    Launch the Portfolio Explorer Dash app.
+    n_rows, thumb = _draw_info(ax_info, cr, idx + 1, n, strategies)
+    scroll_info["n_rows"]  = n_rows
+    scroll_info["offset"]  = 0
+    scroll_info["thumb"]   = thumb
 
-    Args:
-        portfolios : list of ValidPortfolio from the pipeline (sorted by Sharpe)
-        config     : PortfolioConfig (for account_balance etc.)
-        port       : local port to serve on (default 8060)
-    """
-    if not portfolios:
-        print("  No valid portfolios to display.")
-        return
+    _draw_equity(ax_eq, cr)
+    _draw_metrics(ax_metrics, cr)
 
-    dropdown_options = [
-        {"label": _portfolio_label(vp, i + 1), "value": i}
-        for i, vp in enumerate(portfolios)
+    n_pass = cr.n_valid_methods
+    n_fail = len(METHODS) - n_pass
+    status = f"{n_pass}/4 DD pass" + (f"  {n_fail} fail (shown dashed)" if n_fail else "")
+
+    fig.suptitle(
+        f"Combination #{idx+1}/{n}  |  {cr.combo_label}  |  "
+        f"Raw R/DD {cr.raw_return_dd:.2f}  |  {status}",
+        color=CYAN, fontsize=11, y=0.99,
+    )
+    nav_label.set_text(f"Combination {idx + 1} of {n}")
+    fig.canvas.draw_idle()
+
+
+# ── Overview table (Window 2) ──────────────────────────────────────────────────
+
+def _show_overview(combinations: list[CombinationResult]) -> None:
+    col_labels = [
+        "#", "Strategies", "Raw R/DD",
+        f"Sharpe ({METHOD_LABELS['equal']})",
+        f"Sharpe ({METHOD_LABELS['min_variance']})",
+        f"Sharpe ({METHOD_LABELS['risk_parity']})",
+        f"Sharpe ({METHOD_LABELS['hrp']})",
+        "Best CAGR%", "Best MaxDD%", "Best R/DD", "DD Pass",
     ]
 
-    ranking_rows    = _ranking_data(portfolios)
-    ranking_columns = [{"name": c, "id": c} for c in ranking_rows[0].keys()]
+    rows_data = []
+    for cr in combinations:
+        def _s(m, _cr=cr):
+            vp = _cr.portfolios.get(m)
+            return f"{vp.metrics['sharpe_ratio']:.3f}" if vp else "—"
 
-    app = dash.Dash(__name__, title="AlphaForge — Portfolio Explorer")
+        def _best(key, higher=True, _cr=cr):
+            vals = [vp.metrics.get(key, 0) for vp in _cr.portfolios.values() if vp]
+            if not vals:
+                return "—"
+            v = (max if higher else min)(vals)
+            return f"{v:.2f}"
 
-    app.layout = html.Div(style={"backgroundColor": BG, "minHeight": "100vh", "fontFamily": "monospace"}, children=[
+        rows_data.append([
+            str(cr.rank),
+            f"Combination {cr.rank}",
+            f"{cr.raw_return_dd:.2f}",
+            _s("equal"), _s("min_variance"), _s("risk_parity"), _s("hrp"),
+            _best("cagr"),
+            _best("pct_drawdown", higher=False),
+            _best("return_dd_ratio"),
+            f"{cr.n_valid_methods}/4",
+        ])
 
-        # Header
-        html.Div(style={"backgroundColor": PANEL, "padding": "12px 24px", "borderBottom": f"1px solid {BORDER}"}, children=[
-            html.H2("AlphaForge — Portfolio Explorer", style={"color": CYAN, "margin": 0, "fontSize": "18px"}),
-            html.Span(f"{len(portfolios)} valid portfolios", style={"color": DIM, "fontSize": "12px"}),
-        ]),
-
-        # Tabs
-        dcc.Tabs(
-            style={"backgroundColor": PANEL},
-            colors={"border": BORDER, "primary": CYAN, "background": PANEL},
-            children=[
-
-                # ── Tab 1: Portfolio View ──────────────────────────────────
-                dcc.Tab(label="Portfolio View", style={"color": DIM}, selected_style={"color": CYAN, "backgroundColor": BG}, children=[
-                    html.Div(style={"padding": "12px 24px"}, children=[
-
-                        # Dropdown
-                        html.Div(style={"marginBottom": "12px"}, children=[
-                            html.Label("Select portfolio:", style={"color": DIM, "fontSize": "12px", "marginRight": "8px"}),
-                            dcc.Dropdown(
-                                id="portfolio-dropdown",
-                                options=dropdown_options,
-                                value=0,
-                                clearable=False,
-                                style={
-                                    "width": "600px", "display": "inline-block",
-                                    "backgroundColor": PANEL, "color": TEXT,
-                                    "border": f"1px solid {BORDER}",
-                                },
-                            ),
-                        ]),
-
-                        # Main layout: left info + right chart
-                        html.Div(style={"display": "flex", "gap": "16px"}, children=[
-
-                            # Left info panel
-                            html.Div(
-                                id="info-panel",
-                                style={
-                                    "width": "320px", "flexShrink": "0",
-                                    "backgroundColor": PANEL,
-                                    "border": f"1px solid {BORDER}",
-                                    "borderRadius": "6px",
-                                    "overflowY": "auto",
-                                    "maxHeight": "680px",
-                                },
-                            ),
-
-                            # Right chart
-                            html.Div(style={"flexGrow": "1"}, children=[
-                                dcc.Graph(
-                                    id="equity-chart",
-                                    style={"height": "680px"},
-                                    config={"displayModeBar": False},
-                                ),
-                            ]),
-                        ]),
-                    ]),
-                ]),
-
-                # ── Tab 2: Ranking ─────────────────────────────────────────
-                dcc.Tab(label="Ranking", style={"color": DIM}, selected_style={"color": CYAN, "backgroundColor": BG}, children=[
-                    html.Div(style={"padding": "24px"}, children=[
-                        html.P("All valid portfolios sorted by Sharpe ratio. Click a column header to sort.",
-                               style={"color": DIM, "fontSize": "12px", "marginBottom": "12px"}),
-                        dash_table.DataTable(
-                            id="ranking-table",
-                            columns=ranking_columns,
-                            data=ranking_rows,
-                            sort_action="native",
-                            filter_action="native",
-                            page_size=25,
-                            style_table={"overflowX": "auto"},
-                            style_header={
-                                "backgroundColor": PANEL,
-                                "color": CYAN,
-                                "fontWeight": "bold",
-                                "border": f"1px solid {BORDER}",
-                                "fontSize": "11px",
-                            },
-                            style_cell={
-                                "backgroundColor": BG,
-                                "color": TEXT,
-                                "border": f"1px solid {BORDER}",
-                                "fontSize": "11px",
-                                "fontFamily": "monospace",
-                                "padding": "6px 10px",
-                            },
-                            style_data_conditional=[
-                                {"if": {"filter_query": '{MAE Stress} = "✓"'},
-                                 "color": GREEN},
-                                {"if": {"filter_query": '{MAE Stress} = "✗"'},
-                                 "color": RED},
-                            ],
-                        ),
-                    ]),
-                ]),
-            ],
-        ),
-    ])
-
-    # ── Callbacks ─────────────────────────────────────────────────────────────
-
-    @app.callback(
-        Output("equity-chart", "figure"),
-        Output("info-panel",   "children"),
-        Input("portfolio-dropdown", "value"),
+    n     = len(combinations)
+    fig_h = max(5.0, n * 0.42 + 3.0)
+    fig2, ax2 = plt.subplots(figsize=(24, fig_h), facecolor=BG)
+    ax2.set_facecolor(BG)
+    ax2.axis("off")
+    fig2.suptitle(
+        "Portfolio Overview  —  combinations ranked by equal-weight Return/DD  "
+        "|  dashed = DD>limit (still usable at lower sizing)",
+        color=CYAN, fontsize=11, y=0.98,
     )
-    def update_portfolio(idx):
-        vp  = portfolios[idx]
-        fig = _build_chart(vp, config.account_balance)
-        info = _info_panel(vp)
-        return fig, info
 
-    print(f"\n  Portfolio Explorer running at http://localhost:{port}\n")
-    app.run(debug=False, port=port)
+    tbl = ax2.table(
+        cellText=rows_data,
+        colLabels=col_labels,
+        loc="center",
+        cellLoc="center",
+    )
+    tbl.auto_set_font_size(False)
+    tbl.set_fontsize(8)
+    tbl.auto_set_column_width(range(len(col_labels)))
+    tbl.scale(1, 1.3)
+
+    sharpe_cols = {3: "equal", 4: "min_variance", 5: "risk_parity", 6: "hrp"}
+    dd_col = 10
+
+    for (r, c), cell in tbl.get_celld().items():
+        cell.set_edgecolor(BORDER)
+        if r == 0:
+            cell.set_facecolor(COL_HDR)
+            if c in sharpe_cols:
+                cell.get_text().set_color(METHOD_COLORS[sharpe_cols[c]])
+            else:
+                cell.get_text().set_color(CYAN)
+            cell.get_text().set_fontweight("bold")
+        else:
+            bg = ROW_A if r % 2 == 0 else ROW_B
+            cell.set_facecolor(bg)
+            cr = combinations[r - 1]
+            if c in sharpe_cols:
+                m  = sharpe_cols[c]
+                vp = cr.portfolios.get(m)
+                color = METHOD_COLORS[m] if (vp and not vp.dd_failed) else DIM
+                cell.get_text().set_color(color)
+            elif c == dd_col:
+                n_ok = cr.n_valid_methods
+                cell.get_text().set_color(GREEN if n_ok == 4 else AMBER if n_ok >= 2 else RED)
+            else:
+                cell.get_text().set_color(TEXT)
+
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
+
+
+# ── Entry point ────────────────────────────────────────────────────────────────
+
+def run_portfolio_dashboard(
+    combinations: list[CombinationResult],
+    config: PortfolioConfig,
+    strategies: dict | None = None,
+    _show: bool = True,
+) -> None:
+    """
+    Open two local matplotlib windows.
+
+    Window 1: combination explorer (< Prev / Next >).
+    Window 2: ranking overview table.
+    """
+    if not combinations:
+        print("  No combinations to display.")
+        return
+
+    strategies = strategies or {}
+    n          = len(combinations)
+    state      = {"idx": 0}
+    scroll_info: dict = {"offset": 0, "n_rows": 0, "thumb": None}
+
+    # ── Figure & layout ────────────────────────────────────────────────────────
+    fig = plt.figure(figsize=(24, 12), facecolor=BG)
+
+    gs = gridspec.GridSpec(
+        2, 2,
+        figure=fig,
+        width_ratios=[1.0, 3.0],    # wider right column for equity + metrics
+        height_ratios=[2.6, 2.4],
+        hspace=0.06,
+        wspace=0.04,
+        left=0.01, right=0.99,
+        top=0.93, bottom=0.10,
+    )
+
+    ax_info    = fig.add_subplot(gs[0:2, 0])
+    ax_eq      = fig.add_subplot(gs[0, 1])
+    ax_metrics = fig.add_subplot(gs[1, 1])
+
+    ax_nav = fig.add_axes([0.42, 0.02, 0.16, 0.045])
+    ax_nav.set_facecolor(BG)
+    ax_nav.axis("off")
+    nav_label = ax_nav.text(0.5, 0.5, "", transform=ax_nav.transAxes,
+                            color=TEXT, ha="center", va="center", fontsize=10)
+
+    ax_prev = fig.add_axes([0.34, 0.02, 0.07, 0.045])
+    ax_next = fig.add_axes([0.59, 0.02, 0.07, 0.045])
+    btn_prev = Button(ax_prev, "< Prev", color=AX_BG, hovercolor=BORDER)
+    btn_next = Button(ax_next, "Next >", color=AX_BG, hovercolor=BORDER)
+    btn_prev.label.set_color(TEXT)
+    btn_next.label.set_color(TEXT)
+
+    # ── Navigation callbacks ───────────────────────────────────────────────────
+    def on_prev(event):
+        state["idx"] = max(state["idx"] - 1, 0)
+        _render(fig, ax_info, ax_eq, ax_metrics, nav_label,
+                combinations[state["idx"]], state["idx"], n,
+                strategies, scroll_info)
+
+    def on_next(event):
+        state["idx"] = min(state["idx"] + 1, n - 1)
+        _render(fig, ax_info, ax_eq, ax_metrics, nav_label,
+                combinations[state["idx"]], state["idx"], n,
+                strategies, scroll_info)
+
+    btn_prev.on_clicked(on_prev)
+    btn_next.on_clicked(on_next)
+
+    # ── Scroll callback ────────────────────────────────────────────────────────
+    def on_scroll(event):
+        if event.inaxes != ax_info:
+            return
+        n_rows = scroll_info["n_rows"]
+        if n_rows <= _INFO_VISIBLE:
+            return
+
+        step = -int(event.step) * 2   # scroll up = negative step = move thumb up
+        new_offset = max(
+            0,
+            min(n_rows - _INFO_VISIBLE, scroll_info["offset"] + step),
+        )
+        scroll_info["offset"] = new_offset
+
+        top = n_rows - new_offset
+        ax_info.set_ylim(top - _INFO_VISIBLE, top)
+
+        # Move thumb
+        thumb = scroll_info["thumb"]
+        if thumb is not None:
+            thumb.set_y(top - _INFO_VISIBLE)
+
+        fig.canvas.draw_idle()
+
+    fig.canvas.mpl_connect("scroll_event", on_scroll)
+
+    # Keep widget references alive — prevents GC when _show=False returns early
+    fig._refs = [btn_prev, btn_next, state, scroll_info]
+
+    # ── Initial render ─────────────────────────────────────────────────────────
+    _show_overview(combinations)
+    _render(fig, ax_info, ax_eq, ax_metrics, nav_label,
+            combinations[0], 0, n, strategies, scroll_info)
+
+    if _show:
+        plt.show()

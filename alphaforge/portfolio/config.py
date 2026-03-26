@@ -17,8 +17,8 @@ class PortfolioConfig:
     base_risk_per_trade: float = 100.0       # $100/trade — matches backtest unit
 
     # ── Portfolio size ────────────────────────────────────────────────────────
-    min_strategies: int = 3
-    max_strategies: int = 4
+    min_strategies: int = 2
+    max_strategies: int = 8
 
     # ── Static correlation filter thresholds ─────────────────────────────────
     max_pearson_corr: float = 0.30           # monthly P&L, linear
@@ -27,15 +27,16 @@ class PortfolioConfig:
     same_asset_same_day: bool = True         # True = same day; False = tighten to same bar
 
     # ── Rolling correlation filter thresholds ────────────────────────────────
-    rolling_window_months: int = 12          # size of each rolling window (months)
+    rolling_window_months: int = 36          # size of each rolling window (months)
     max_rolling_corr: float = 0.35           # all windows must be below this
     max_rolling_corr_recent: float = 0.30    # windows within the recent period must be below this
     recent_years: int = 3                    # trailing years considered "recent"
 
     # ── Generation parameters ────────────────────────────────────────────────
-    n_portfolios: int = 10000                # number of random combinations to attempt
+    n_portfolios: int = 50000                # number of random combinations to attempt
     max_rounds: int = 5                      # auto-regeneration rounds if all portfolios rejected
     random_seed: int | None = None
+    top_combinations: int = 50               # top-N combos (by equal-weight return/DD) to weight
 
     # ── Computed properties ──────────────────────────────────────────────────
     @property

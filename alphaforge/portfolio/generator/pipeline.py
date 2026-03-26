@@ -1,81 +1,263 @@
 """
-pipeline.py — Full portfolio generation pipeline orchestrator (Steps 1–4).
+pipeline.py — Full portfolio generation pipeline.
 
-Ties together: sampler → filters → weighting → scaler → validator.
+Filter order (applied before expensive rolling correlation check):
+  1. Sample combinations
+  2. Static correlation filters   (Pearson, Spearman, co-loss, same-asset)
+  3. Raw DD check                 (equal-weight scaled → max daily loss + total DD)
+  4. Rolling correlation filters  (12-month windows, recent stricter threshold)
+  5. Rank by return/DD            (equal-weight scaled) → keep top_combinations
+  6. Apply all 4 weighting methods to the top-N → CombinationResult per combo
 
-Auto-regeneration: if a round produces 0 valid portfolios, re-samples with a
-different random seed up to config.max_rounds times. If still 0 after all
-rounds, reports which filter stage dominated rejections so the user can adjust
-thresholds.
+Auto-regeneration: if a round yields 0 ranked combinations, re-samples with
+an offset seed up to config.max_rounds times.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from tqdm import tqdm
 
 from alphaforge.portfolio.config import PortfolioConfig
+from alphaforge.portfolio.universe import build_universe
 from alphaforge.portfolio.generator.sampler import sample_combinations
-from alphaforge.portfolio.generator.filters import filter_combinations, FilterStats
+from alphaforge.portfolio.generator.filters import (
+    filter_static_only,
+    filter_rolling_only,
+    FilterStats,
+)
 from alphaforge.portfolio.generator.weighting import (
     compute_all_weights,
     build_weighted_portfolio,
     METHODS,
+    equal_weight,
 )
 from alphaforge.portfolio.generator.scaler import rescale
 from alphaforge.portfolio.generator.validator import validate, ValidPortfolio
+from alphaforge.portfolio.generator.combo_result import CombinationResult
 
+
+# ── Step 3: Raw DD check (equal-weight scaled) ────────────────────────────────
+
+def _raw_dd_filter(
+    combinations: list[tuple[str, ...]],
+    strategies: dict,
+    config: PortfolioConfig,
+    stats: FilterStats,
+    verbose: bool = True,
+) -> tuple[list[tuple[str, ...]], dict[tuple, ValidPortfolio]]:
+    """
+    Check each combination at base risk (equal-weight, NO scaling).
+
+    Rejects combinations where the raw portfolio already breaches either:
+      - daily loss limit  : worst single day  < -daily_loss_limit_usd
+      - total DD limit    : max drawdown       >  total_drawdown_limit_usd
+
+    If the raw portfolio is within both limits before any scaling, the
+    combination is a sound base — scaling and full DD validation are
+    applied later (after weighting) by validate().
+
+    Also pre-computes the equal-weight SCALED portfolio for survivors so
+    the ranking step (Step 5) can reuse it without recomputation.
+
+    Returns:
+        (dd_passed_combos, {combo: equal_weight_scaled_ValidPortfolio})
+    """
+    import pandas as pd
+
+    passed    : list[tuple] = []
+    equal_vps : dict[tuple, ValidPortfolio] = {}
+
+    with tqdm(
+        combinations,
+        desc="  DD check (raw base-risk)",
+        unit="combo",
+        disable=not verbose,
+    ) as bar:
+        for combo in bar:
+            weights   = equal_weight(list(combo))
+            portfolio = build_weighted_portfolio(combo, strategies, weights)
+
+            # ── Raw (unscaled) checks ──────────────────────────────────────
+            daily = (
+                portfolio
+                .groupby(portfolio["Close time"].dt.date)["Profit/Loss"]
+                .sum()
+            )
+            worst_day = float(daily.min())
+
+            # Build raw equity curve for DD
+            dr     = pd.date_range(daily.index.min(), daily.index.max(), freq="D")
+            equity = daily.reindex(dr, fill_value=0.0).cumsum()
+            total_eq = config.account_balance + equity
+            peak     = total_eq.cummax()
+            raw_dd   = float((peak - total_eq).max())
+
+            if (worst_day < -config.daily_loss_limit_usd or
+                    raw_dd > config.total_drawdown_limit_usd):
+                stats.rejected_dd += 1
+                bar.set_postfix(passed=len(passed), tried=bar.n)
+                continue
+
+            # ── Pre-compute scaled equal-weight VP for ranking ─────────────
+            scaled = rescale(combo, "equal", weights, portfolio, config)
+            vp     = validate(scaled, config)   # always non-None now
+
+            passed.append(combo)
+            equal_vps[combo] = vp
+            bar.set_postfix(passed=len(passed), tried=bar.n)
+
+    stats.passed_dd = len(passed)
+
+    if verbose:
+        rej = len(combinations) - len(passed)
+        print(f"\n  DD check: {len(passed)}/{len(combinations)} passed "
+              f"({rej} exceeded daily or total-DD limit at base risk).\n")
+
+    return passed, equal_vps
+
+
+# ── Step 5: Rank by return/DD ─────────────────────────────────────────────────
+
+def _rank_combinations(
+    combinations: list[tuple[str, ...]],
+    equal_vps: dict[tuple, ValidPortfolio],
+    config: PortfolioConfig,
+    verbose: bool = True,
+) -> list[tuple[tuple[str, ...], ValidPortfolio]]:
+    """
+    Sort rolling-passed combinations by equal-weight return/DD (descending).
+    Return the top config.top_combinations.
+    """
+    ranked = sorted(
+        [
+            (combo, equal_vps[combo],
+             equal_vps[combo].metrics.get("return_dd_ratio", 0.0))
+            for combo in combinations
+            if combo in equal_vps
+        ],
+        key=lambda x: x[2],
+        reverse=True,
+    )
+
+    top = ranked[: config.top_combinations]
+
+    if verbose and top:
+        print(
+            f"  Ranking: {len(ranked)} combination(s), top {len(top)} selected  "
+            f"(R/DD: {top[-1][2]:.2f}–{top[0][2]:.2f}).\n"
+        )
+
+    return [(combo, vp) for combo, vp, _ in top]
+
+
+# ── Step 6: Apply all 4 weighting methods ────────────────────────────────────
+
+def _build_combination_results(
+    top_ranked: list[tuple[tuple[str, ...], ValidPortfolio]],
+    strategies: dict,
+    config: PortfolioConfig,
+    verbose: bool = True,
+) -> list[CombinationResult]:
+    """
+    For each combination, apply min_variance / risk_parity / hrp.
+    (equal is already computed and passed in.)
+    Returns list of CombinationResult sorted by raw_return_dd descending.
+    """
+    results: list[CombinationResult] = []
+
+    with tqdm(
+        top_ranked,
+        desc="  Weighting (4 methods)",
+        unit="combo",
+        disable=not verbose,
+    ) as bar:
+        for rank_idx, (combo, equal_vp) in enumerate(bar, 1):
+            portfolios: dict = {"equal": equal_vp}
+
+            weights_all = compute_all_weights(combo, strategies)
+            for method in ("min_variance", "risk_parity", "hrp"):
+                weights   = weights_all[method]
+                portfolio = build_weighted_portfolio(combo, strategies, weights)
+                scaled    = rescale(combo, method, weights, portfolio, config)
+                portfolios[method] = validate(scaled, config)  # None if DD exceeded
+
+            results.append(CombinationResult(
+                combination   = combo,
+                rank          = rank_idx,
+                raw_return_dd = equal_vp.metrics.get("return_dd_ratio", 0.0),
+                raw_metrics   = equal_vp.metrics,
+                portfolios    = portfolios,
+            ))
+
+    return results
+
+
+# ── Pipeline result ───────────────────────────────────────────────────────────
 
 @dataclass
 class PipelineResult:
     """Summary of a full pipeline run."""
-    valid_portfolios       : list[ValidPortfolio]
-    total_sampled          : int
-    total_filter_stats     : list[FilterStats]
-    rounds_used            : int
-    succeeded              : bool
+    combinations       : list[CombinationResult]
+    total_sampled      : int
+    total_filter_stats : list[FilterStats]
+    rounds_used        : int
+    succeeded          : bool
 
     @property
     def count(self) -> int:
-        return len(self.valid_portfolios)
+        return len(self.combinations)
+
+    @property
+    def total_portfolios(self) -> int:
+        return self.count * len(METHODS)
+
+    @property
+    def valid_portfolios(self) -> int:
+        return sum(cr.n_valid_methods for cr in self.combinations)
 
     def report(self) -> None:
         print(f"\n  ══ Pipeline Result ════════════════════════════")
-        print(f"  Rounds used       : {self.rounds_used}")
-        print(f"  Combinations tried: {self.total_sampled}")
-        print(f"  Valid portfolios  : {self.count}")
-        if self.valid_portfolios:
-            sharpes = [vp.sharpe for vp in self.valid_portfolios]
-            print(f"  Sharpe range      : {min(sharpes):.2f} – {max(sharpes):.2f}")
+        print(f"  Rounds used          : {self.rounds_used}")
+        print(f"  Combinations tried   : {self.total_sampled}")
+        print(f"  Top combinations     : {self.count}")
+        print(f"  Total portfolios     : {self.total_portfolios}  "
+              f"({self.valid_portfolios} passed DD validation)")
+        if self.combinations:
+            rdd = [cr.raw_return_dd for cr in self.combinations]
+            print(f"  Return/DD range      : {min(rdd):.2f} – {max(rdd):.2f}")
         print(f"  ═══════════════════════════════════════════════\n")
 
     def _dominant_rejection(self) -> str:
-        """Identify which filter stage caused the most rejections overall."""
         totals = {
-            "pearson"    : sum(s.rejected_pearson     for s in self.total_filter_stats),
-            "spearman"   : sum(s.rejected_spearman    for s in self.total_filter_stats),
-            "co_loss"    : sum(s.rejected_co_loss     for s in self.total_filter_stats),
-            "same_asset" : sum(s.rejected_same_asset  for s in self.total_filter_stats),
-            "rolling"    : sum(s.rejected_rolling     for s in self.total_filter_stats),
+            "pearson"    : sum(s.rejected_pearson    for s in self.total_filter_stats),
+            "spearman"   : sum(s.rejected_spearman   for s in self.total_filter_stats),
+            "co_loss"    : sum(s.rejected_co_loss    for s in self.total_filter_stats),
+            "same_asset" : sum(s.rejected_same_asset for s in self.total_filter_stats),
+            "dd"         : sum(s.rejected_dd         for s in self.total_filter_stats),
+            "rolling"    : sum(s.rejected_rolling    for s in self.total_filter_stats),
         }
         return max(totals, key=totals.get)
 
     def warn_if_empty(self) -> None:
-        if self.valid_portfolios:
+        if self.combinations:
             return
         dominant = self._dominant_rejection()
         labels = {
-            "pearson"   : "Pearson correlation     → lower max_pearson_corr",
-            "spearman"  : "Spearman correlation    → lower max_spearman_corr",
-            "co_loss"   : "Co-loss frequency       → raise max_co_loss_freq",
-            "same_asset": "Same-asset conflict     → set same_asset_same_day=False",
-            "rolling"   : "Rolling correlation     → raise max_rolling_corr / max_rolling_corr_recent",
+            "pearson"    : "Pearson correlation     → lower max_pearson_corr",
+            "spearman"   : "Spearman correlation    → lower max_spearman_corr",
+            "co_loss"    : "Co-loss frequency       → raise max_co_loss_freq",
+            "same_asset" : "Same-asset conflict     → set same_asset_same_day=False",
+            "dd"         : "Total drawdown (DD check)→ raise total_drawdown_limit_pct",
+            "rolling"    : "Rolling correlation     → raise max_rolling_corr / max_rolling_corr_recent",
         }
-        print("\n  ⚠  No valid portfolios found after all rounds.")
+        print("\n  No combinations found after all rounds.")
         print(f"  Dominant rejection: {labels.get(dominant, dominant)}")
         print("  Adjust the threshold in PortfolioConfig and retry.\n")
 
+
+# ── Entry point ───────────────────────────────────────────────────────────────
 
 def run_pipeline(
     strategies: dict,
@@ -85,43 +267,33 @@ def run_pipeline(
     """
     Run the full portfolio generation pipeline.
 
-    Steps per round:
-      1. Sample combinations (sampler)
-      2. Filter — static + rolling (filters)
-      3. For each survivor × each weighting method:
-           a. Compute weights
-           b. Build weighted portfolio DataFrame
-           c. Rescale to daily loss limit
-           d. Validate against total drawdown limit
-      4. Collect valid portfolios
-
-    If 0 valid portfolios after a round AND more rounds remain, re-sample
-    with an offset seed and retry.
-
-    Args:
-        strategies : dict name → DataFrame (pre-loaded strategies)
-        config     : PortfolioConfig
-        verbose    : print progress
-
-    Returns:
-        PipelineResult with all valid portfolios and diagnostics.
+    Filter order:
+      1. Static correlation (Pearson, Spearman, co-loss, same-asset)
+      2. Raw DD check        (equal-weight scaled → total-DD validation)
+      3. Rolling correlation (36-month windows)
+      4. Rank by return/DD  → top_combinations selected
+      5. Apply 4 methods    → CombinationResult per combo
     """
-    all_valid      : list[ValidPortfolio] = []
-    all_stats      : list[FilterStats]   = []
-    total_sampled  : int = 0
-    rounds_used    : int = 0
+    all_combos   : list[CombinationResult] = []
+    all_stats    : list[FilterStats]       = []
+    total_sampled: int = 0
+    rounds_used  : int = 0
+
+    universe = build_universe(
+        strategies,
+        same_asset_same_day=config.same_asset_same_day,
+        verbose=verbose,
+    )
 
     for round_n in range(config.max_rounds):
         rounds_used = round_n + 1
-
-        # Vary seed each round so we don't re-sample identical combinations
-        round_seed = (
+        round_seed  = (
             config.random_seed + round_n * 1000
             if config.random_seed is not None
             else None
         )
         round_config = PortfolioConfig(
-            **{k: v for k, v in config.__dict__.items() if not k.startswith("_")},
+            **{k: v for k, v in config.__dict__.items() if not k.startswith("_")}
         )
         round_config.random_seed = round_seed
 
@@ -132,51 +304,73 @@ def run_pipeline(
         combinations = sample_combinations(strategies, round_config)
         total_sampled += len(combinations)
 
-        passed, stats = filter_combinations(combinations, strategies, round_config, verbose=verbose)
-        all_stats.append(stats)
+        # ── Step 1: Static correlation filters ────────────────────────────────
+        static_passed, monthly_cache, stats = filter_static_only(
+            combinations, strategies, round_config,
+            verbose=verbose, universe=universe,
+        )
 
-        if not passed:
+        if not static_passed:
+            all_stats.append(stats)
             if verbose:
-                print("  No combinations survived filters. Trying next round...")
+                print("  No combinations survived static filters. Trying next round...")
             continue
 
-        # Steps 2–4: weight → scale → validate
-        round_valid: list[ValidPortfolio] = []
+        # ── Step 2: Raw DD check (before rolling — cheap to compute) ──────────
+        dd_passed, equal_vps = _raw_dd_filter(
+            static_passed, strategies, round_config, stats, verbose=verbose,
+        )
 
-        with tqdm(
-            passed,
-            desc="  Weighting & validating",
-            unit="combo",
-            disable=not verbose,
-        ) as bar:
-            for combo in bar:
-                weights_all = compute_all_weights(combo, strategies)
-                for method in METHODS:
-                    weights    = weights_all[method]
-                    portfolio  = build_weighted_portfolio(combo, strategies, weights)
-                    scaled     = rescale(combo, method, weights, portfolio, config)
-                    valid      = validate(scaled, config)
-                    if valid:
-                        round_valid.append(valid)
-                bar.set_postfix(valid=len(round_valid))
+        if not dd_passed:
+            all_stats.append(stats)
+            if verbose:
+                print("  No combinations survived DD check. Trying next round...")
+            continue
 
-        all_valid.extend(round_valid)
+        # ── Step 3: Rolling correlation filters ────────────────────────────────
+        rolling_passed, stats = filter_rolling_only(
+            dd_passed, monthly_cache, round_config,
+            verbose=verbose, stats=stats,
+        )
+        all_stats.append(stats)
+
+        if not rolling_passed:
+            if verbose:
+                print("  No combinations survived rolling filters. Trying next round...")
+            continue
+
+        # ── Step 4: Rank by return/DD → top_combinations ──────────────────────
+        top_ranked = _rank_combinations(
+            rolling_passed, equal_vps, round_config, verbose=verbose,
+        )
+
+        if not top_ranked:
+            if verbose:
+                print("  No combinations to rank. Trying next round...")
+            continue
+
+        # ── Step 5: Apply all 4 weighting methods ─────────────────────────────
+        combo_results = _build_combination_results(
+            top_ranked, strategies, round_config, verbose=verbose,
+        )
+        all_combos.extend(combo_results)
 
         if verbose:
-            print(f"\n  Round {round_n + 1}: {len(round_valid)} valid portfolio(s) found.")
+            n_valid = sum(cr.n_valid_methods for cr in combo_results)
+            print(f"\n  Round {round_n + 1}: {len(combo_results)} combination(s), "
+                  f"{n_valid} portfolios passed DD validation.")
 
-        if all_valid:
-            break
+        break  # first successful round — stop
 
-    # Sort by Sharpe descending
-    all_valid.sort(key=lambda vp: vp.sharpe, reverse=True)
+    # Sort by raw return/DD descending
+    all_combos.sort(key=lambda cr: cr.raw_return_dd, reverse=True)
 
     result = PipelineResult(
-        valid_portfolios   = all_valid,
+        combinations       = all_combos,
         total_sampled      = total_sampled,
         total_filter_stats = all_stats,
         rounds_used        = rounds_used,
-        succeeded          = len(all_valid) > 0,
+        succeeded          = len(all_combos) > 0,
     )
 
     if verbose:

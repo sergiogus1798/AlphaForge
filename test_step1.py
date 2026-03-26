@@ -36,7 +36,7 @@ print(f"  {len(combinations)} combinations sampled "
 
 # ── Static filters (kept separate so we can inspect survivors) ────────────────
 
-static_passed, monthly_cache = filter_static_only(combinations, strategies, config)
+static_passed, monthly_cache, _ = filter_static_only(combinations, strategies, config)
 
 # ── Plot rolling correlations for the static survivors ────────────────────────
 

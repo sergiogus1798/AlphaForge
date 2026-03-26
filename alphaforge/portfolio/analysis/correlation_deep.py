@@ -235,12 +235,67 @@ def plot_dendrogram(
     plt.show()
 
 
+# ── 5. Tail correlation ───────────────────────────────────────────────────────
+
+def plot_tail_correlation(
+    strategies: dict,
+    tail_pct: float = 0.10,
+    figsize: tuple = (10, 6),
+) -> None:
+    """
+    Tail correlation heatmap.
+
+    Computes Pearson correlation between every strategy pair, but only on the
+    worst `tail_pct` fraction of days for the combined portfolio. These are the
+    days that matter most for the daily loss limit — if strategies are correlated
+    here, they blow up together.
+
+    Args:
+        strategies : dict name → DataFrame
+        tail_pct   : fraction of worst days to use (default 0.10 = worst 10%)
+        figsize    : figure size
+    """
+    pnl    = _daily_pnl_matrix(strategies)
+    labels = [_short(n) for n in pnl.columns]
+
+    # Identify worst days by combined portfolio loss
+    combined = pnl.sum(axis=1)
+    n_tail   = max(1, int(len(combined) * tail_pct))
+    tail_idx = combined.nsmallest(n_tail).index
+    tail_pnl = pnl.loc[tail_idx]
+
+    tail_corr = tail_pnl.corr(method="pearson")
+
+    fig, ax = plt.subplots(figsize=figsize, facecolor=BG)
+    fig.suptitle(
+        f"Tail Correlation  (worst {tail_pct*100:.0f}% of days  |  n={n_tail})",
+        color=TEXT, fontsize=11,
+    )
+    ax.set_facecolor(AX_BG)
+    im = ax.imshow(tail_corr.values, cmap="RdYlGn_r", vmin=-1, vmax=1, aspect="auto")
+    ax.set_xticks(range(len(labels)))
+    ax.set_yticks(range(len(labels)))
+    ax.set_xticklabels(labels, rotation=45, ha="right", color=TEXT, fontsize=7)
+    ax.set_yticklabels(labels, color=TEXT, fontsize=7)
+
+    for i in range(len(labels)):
+        for j in range(len(labels)):
+            val = tail_corr.values[i, j]
+            ax.text(j, i, f"{val:.2f}", ha="center", va="center",
+                    fontsize=6, color="black" if abs(val) < 0.7 else "white")
+
+    plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    plt.tight_layout()
+    plt.show()
+
+
 # ── Run all ───────────────────────────────────────────────────────────────────
 
-def run_deep_analysis(strategies: dict) -> None:
-    """Run all four deep correlation analyses on the strategy pool."""
+def run_deep_analysis(strategies: dict, tail_pct: float = 0.10) -> None:
+    """Run all five deep correlation analyses on the strategy pool."""
     print("  Running deep correlation analysis on strategy pool...\n")
     plot_correlation_matrices(strategies)
     plot_pca(strategies)
     plot_dendrogram(strategies)
+    plot_tail_correlation(strategies, tail_pct=tail_pct)
     print("  Done. Use plot_rolling_correlation_heatmap(strategies, pair) for specific pairs.\n")

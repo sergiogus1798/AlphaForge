@@ -98,12 +98,12 @@ def pearson_filter(
     b_monthly: pd.Series,
     threshold: float,
 ) -> bool:
-    """True (PASS) if full-period Pearson correlation <= threshold."""
+    """True (PASS) if full-period |Pearson correlation| <= threshold."""
     a, b = _align_monthly(a_monthly, b_monthly)
     if len(a) < 6:
         return True
     corr, _ = pearsonr(a.values, b.values)
-    return corr <= threshold
+    return abs(corr) <= threshold
 
 
 def spearman_filter(
@@ -111,12 +111,12 @@ def spearman_filter(
     b_monthly: pd.Series,
     threshold: float,
 ) -> bool:
-    """True (PASS) if full-period Spearman correlation <= threshold."""
+    """True (PASS) if full-period |Spearman correlation| <= threshold."""
     a, b = _align_monthly(a_monthly, b_monthly)
     if len(a) < 6:
         return True
     corr, _ = spearmanr(a.values, b.values)
-    return corr <= threshold
+    return abs(corr) <= threshold
 
 
 def co_loss_filter(
@@ -169,9 +169,9 @@ def rolling_correlation_filter(
     all windows.
 
     Rules:
-      - Every window: pearson <= max_rolling_corr AND spearman <= max_rolling_corr
+      - Every window: |pearson| <= max_rolling_corr AND |spearman| <= max_rolling_corr
       - Windows whose end period falls within the last `recent_years` years:
-        pearson <= max_rolling_corr_recent AND spearman <= max_rolling_corr_recent
+        |pearson| <= max_rolling_corr_recent AND |spearman| <= max_rolling_corr_recent
 
     Windows with insufficient data are skipped.
     Returns True if no windows exist (not enough history).
@@ -191,7 +191,7 @@ def rolling_correlation_filter(
             if period > recent_cutoff
             else config.max_rolling_corr
         )
-        if row["pearson"] > threshold or row["spearman"] > threshold:
+        if abs(row["pearson"]) > threshold or abs(row["spearman"]) > threshold:
             return False
 
     return True
@@ -201,27 +201,31 @@ def rolling_correlation_filter(
 
 @dataclass
 class FilterStats:
-    """Tracks how many combinations were rejected by each filter."""
+    """Tracks how many combinations were rejected by each filter stage."""
     total: int = 0
     passed_static: int = 0
+    passed_dd: int = 0
     passed_rolling: int = 0
     rejected_pearson: int = 0
     rejected_spearman: int = 0
     rejected_co_loss: int = 0
     rejected_same_asset: int = 0
+    rejected_dd: int = 0
     rejected_rolling: int = 0
 
     def report(self) -> None:
-        rejected_static = self.total - self.passed_static
-        rejected_rolling = self.passed_static - self.passed_rolling
+        rej_static  = self.total            - self.passed_static
+        rej_dd      = self.passed_static    - self.passed_dd
+        rej_rolling = self.passed_dd        - self.passed_rolling
         print(f"\n  ── Filter Report ──────────────────────────────")
         print(f"  Combinations evaluated : {self.total}")
-        print(f"  Passed static filters  : {self.passed_static}  ({rejected_static} rejected)")
+        print(f"  Passed static filters  : {self.passed_static}  ({rej_static} rejected)")
         print(f"    ↳ Pearson            : {self.rejected_pearson} rejected")
         print(f"    ↳ Spearman           : {self.rejected_spearman} rejected")
         print(f"    ↳ Co-loss frequency  : {self.rejected_co_loss} rejected")
         print(f"    ↳ Same-asset conflict: {self.rejected_same_asset} rejected")
-        print(f"  Passed rolling filters : {self.passed_rolling}  ({rejected_rolling} rejected)")
+        print(f"  Passed DD check        : {self.passed_dd}  ({rej_dd} rejected)")
+        print(f"  Passed rolling filters : {self.passed_rolling}  ({rej_rolling} rejected)")
         print(f"  ───────────────────────────────────────────────\n")
 
 
@@ -233,33 +237,52 @@ def _apply_static_filters(
     config: PortfolioConfig,
     monthly_cache: dict[str, pd.Series],
     stats: FilterStats,
+    universe=None,   # optional Universe for O(1) matrix lookups
 ) -> bool:
-    """Apply the 4 static filters to every pair. Returns True if all pass."""
+    """
+    Apply the 4 static filters to every pair. Returns True if all pass.
+    If a Universe is supplied, all checks are pure index lookups (fast).
+    Otherwise falls back to computing from raw data (slow but correct).
+    """
     names = list(combination)
 
     for i in range(len(names)):
         for j in range(i + 1, len(names)):
             a_name, b_name = names[i], names[j]
-            a_m = monthly_cache[a_name]
-            b_m = monthly_cache[b_name]
 
-            if not pearson_filter(a_m, b_m, config.max_pearson_corr):
-                stats.rejected_pearson += 1
-                return False
+            if universe is not None:
+                # O(1) matrix lookup — pre-computed in Universe
+                if abs(universe.pearson(a_name, b_name)) > config.max_pearson_corr:
+                    stats.rejected_pearson += 1
+                    return False
+                if abs(universe.spearman(a_name, b_name)) > config.max_spearman_corr:
+                    stats.rejected_spearman += 1
+                    return False
+                if universe.co_loss(a_name, b_name) > config.max_co_loss_freq:
+                    stats.rejected_co_loss += 1
+                    return False
+                if universe.has_overlap(a_name, b_name):
+                    stats.rejected_same_asset += 1
+                    return False
+            else:
+                # Fallback: compute from raw monthly series
+                a_m = monthly_cache[a_name]
+                b_m = monthly_cache[b_name]
 
-            if not spearman_filter(a_m, b_m, config.max_spearman_corr):
-                stats.rejected_spearman += 1
-                return False
-
-            if not co_loss_filter(a_m, b_m, config.max_co_loss_freq):
-                stats.rejected_co_loss += 1
-                return False
-
-            if not same_asset_conflict_filter(
-                strategies[a_name], strategies[b_name], config.same_asset_same_day
-            ):
-                stats.rejected_same_asset += 1
-                return False
+                if not pearson_filter(a_m, b_m, config.max_pearson_corr):
+                    stats.rejected_pearson += 1
+                    return False
+                if not spearman_filter(a_m, b_m, config.max_spearman_corr):
+                    stats.rejected_spearman += 1
+                    return False
+                if not co_loss_filter(a_m, b_m, config.max_co_loss_freq):
+                    stats.rejected_co_loss += 1
+                    return False
+                if not same_asset_conflict_filter(
+                    strategies[a_name], strategies[b_name], config.same_asset_same_day
+                ):
+                    stats.rejected_same_asset += 1
+                    return False
 
     return True
 
@@ -291,13 +314,16 @@ def filter_static_only(
     strategies: dict[str, pd.DataFrame],
     config: PortfolioConfig,
     verbose: bool = True,
-) -> tuple[list[tuple[str, ...]], dict[str, pd.Series]]:
+    universe=None,
+) -> tuple[list[tuple[str, ...]], dict[str, pd.Series], FilterStats]:
     """
-    Run only the static filters and return survivors + the monthly cache.
-    Useful for diagnostics before committing to the rolling filter stage.
+    Run only the static filters and return survivors, the monthly cache, and stats.
+
+    If a Universe is supplied, uses pre-computed N×N matrices (fast).
+    Otherwise computes correlations on the fly (slower, used as fallback).
 
     Returns:
-        (static_passed_combinations, monthly_cache)
+        (static_passed_combinations, monthly_cache, FilterStats)
     """
     from tqdm import tqdm
 
@@ -310,7 +336,7 @@ def filter_static_only(
 
     with tqdm(combinations, desc="  Static filters", unit="combo", disable=not verbose) as bar:
         for combo in bar:
-            if _apply_static_filters(combo, strategies, config, monthly_cache, stats):
+            if _apply_static_filters(combo, strategies, config, monthly_cache, stats, universe=universe):
                 static_passed.append(combo)
             bar.set_postfix(passed=len(static_passed), tried=bar.n)
 
@@ -320,7 +346,55 @@ def filter_static_only(
               f"(Pearson: {stats.rejected_pearson}, Spearman: {stats.rejected_spearman}, "
               f"Co-loss: {stats.rejected_co_loss}, Same-asset: {stats.rejected_same_asset} rejected)\n")
 
-    return static_passed, monthly_cache
+    return static_passed, monthly_cache, stats
+
+
+def filter_rolling_only(
+    combinations: list[tuple[str, ...]],
+    monthly_cache: dict[str, pd.Series],
+    config: PortfolioConfig,
+    verbose: bool = True,
+    stats: FilterStats | None = None,
+) -> tuple[list[tuple[str, ...]], FilterStats]:
+    """
+    Run only the rolling filters on combinations that have already passed
+    static filters and the DD check.
+
+    Args:
+        combinations  : combinations to test
+        monthly_cache : pre-computed monthly P&L (from filter_static_only)
+        config        : PortfolioConfig
+        verbose       : print progress
+        stats         : existing FilterStats to update (creates new one if None)
+
+    Returns:
+        (passed_combinations, FilterStats)
+    """
+    from tqdm import tqdm
+
+    if stats is None:
+        stats = FilterStats(
+            total=len(combinations),
+            passed_static=len(combinations),
+            passed_dd=len(combinations),
+        )
+
+    final_passed: list[tuple[str, ...]] = []
+
+    with tqdm(combinations, desc="  Rolling filters", unit="combo", disable=not verbose) as bar:
+        for combo in bar:
+            if _apply_rolling_filters(combo, config, monthly_cache, stats):
+                final_passed.append(combo)
+            bar.set_postfix(passed=len(final_passed), tried=bar.n)
+
+    stats.passed_rolling = len(final_passed)
+
+    if verbose:
+        rej = len(combinations) - len(final_passed)
+        print(f"\n  Rolling filters: {len(final_passed)}/{len(combinations)} passed "
+              f"({rej} rejected).\n")
+
+    return final_passed, stats
 
 
 def filter_combinations(
@@ -328,52 +402,24 @@ def filter_combinations(
     strategies: dict[str, pd.DataFrame],
     config: PortfolioConfig,
     verbose: bool = True,
+    universe=None,
 ) -> tuple[list[tuple[str, ...]], FilterStats]:
     """
-    Run all filters over a list of combinations.
-
-    Static filters run first (fast). Rolling filters only run on combinations
-    that survived the static stage.
+    Run static + rolling filters over a list of combinations.
+    (Convenience wrapper used by test scripts; pipeline uses the split functions.)
 
     Returns:
         (passed_combinations, FilterStats)
-        FilterStats contains per-filter rejection counts for diagnostics.
     """
-    from tqdm import tqdm
+    static_passed, monthly_cache, stats = filter_static_only(
+        combinations, strategies, config, verbose=verbose, universe=universe,
+    )
+    # Mark DD fields as N/A (not checked here)
+    stats.passed_dd = len(static_passed)
 
-    monthly_cache: dict[str, pd.Series] = {
-        name: _monthly_pnl(df) for name, df in strategies.items()
-    }
-
-    stats = FilterStats(total=len(combinations))
-    static_passed = []
-    final_passed = []
-
-    with tqdm(
-        combinations,
-        desc="  Static filters",
-        unit="combo",
-        disable=not verbose,
-    ) as bar:
-        for combo in bar:
-            if _apply_static_filters(combo, strategies, config, monthly_cache, stats):
-                static_passed.append(combo)
-            bar.set_postfix(passed=len(static_passed), tried=bar.n)
-
-    stats.passed_static = len(static_passed)
-
-    with tqdm(
-        static_passed,
-        desc="  Rolling filters",
-        unit="combo",
-        disable=not verbose,
-    ) as bar:
-        for combo in bar:
-            if _apply_rolling_filters(combo, config, monthly_cache, stats):
-                final_passed.append(combo)
-            bar.set_postfix(passed=len(final_passed), tried=bar.n)
-
-    stats.passed_rolling = len(final_passed)
+    final_passed, stats = filter_rolling_only(
+        static_passed, monthly_cache, config, verbose=verbose, stats=stats,
+    )
 
     if verbose:
         stats.report()
@@ -388,22 +434,25 @@ def plot_rolling_correlations(
     monthly_cache: dict[str, pd.Series],
     config: PortfolioConfig,
     max_combos: int = 3,
+    max_pairs_detail: int = 12,
 ) -> None:
     """
     Plot rolling Pearson and Spearman correlations for each pair in the given
     combinations. Useful for inspecting why combinations failed the rolling filter.
 
-    One figure per combination. Each subplot = one strategy pair.
-    Threshold lines are drawn so you can see exactly which windows breached them.
+    For portfolios with <= max_pairs_detail pairs: one subplot per pair (detail view).
+    For portfolios with > max_pairs_detail pairs: heatmap summary of max |correlation|
+    per pair across all rolling windows (compact view), plus detail for top 12 pairs.
 
     Args:
-        combinations  : list of combinations to inspect (typically static survivors)
-        monthly_cache : pre-computed monthly P&L per strategy
-        config        : PortfolioConfig (thresholds + window size)
-        max_combos    : limit how many combinations to plot (default 3)
+        combinations      : list of combinations to inspect (typically static survivors)
+        monthly_cache     : pre-computed monthly P&L per strategy
+        config            : PortfolioConfig (thresholds + window size)
+        max_combos        : limit how many combinations to plot (default 3)
+        max_pairs_detail  : if n_pairs > this, switch to heatmap + top-N detail (default 12)
     """
     import matplotlib.pyplot as plt
-    import matplotlib.patches as mpatches
+    import numpy as np
 
     BG       = "#0f1117"
     AX_BG    = "#1a1a2e"
@@ -414,72 +463,135 @@ def plot_rolling_correlations(
     GRID     = "#2a2a4a"
     TEXT     = "#e0e0e0"
 
+    def _style_ax(ax):
+        ax.set_facecolor(AX_BG)
+        ax.tick_params(colors=TEXT)
+        for spine in ax.spines.values():
+            spine.set_edgecolor(GRID)
+        ax.grid(True, color=GRID, linewidth=0.5)
+
+    def _plot_pair(ax, a_name, b_name, recent_cutoff):
+        roll = _rolling_correlations(
+            monthly_cache[a_name], monthly_cache[b_name], config.rolling_window_months
+        )
+        _style_ax(ax)
+        if roll.empty:
+            ax.text(0.5, 0.5, "Insufficient data", transform=ax.transAxes,
+                    color=TEXT, ha="center")
+        else:
+            x = [p.to_timestamp() for p in roll.index]
+            ax.plot(x, roll["pearson"],  color=PEARSON,  linewidth=1.5, label="Pearson")
+            ax.plot(x, roll["spearman"], color=SPEARMAN, linewidth=1.5, label="Spearman", linestyle="--")
+            ax.axhline(config.max_rolling_corr, color=THRESH, linewidth=1,
+                       linestyle=":", label=f"±{config.max_rolling_corr}")
+            ax.axhline(-config.max_rolling_corr, color=THRESH, linewidth=1, linestyle=":")
+            recent_ts = recent_cutoff.to_timestamp()
+            ax.axhline(config.max_rolling_corr_recent, color=THRESH_R, linewidth=1,
+                       linestyle="-.", label=f"±{config.max_rolling_corr_recent} (recent)")
+            ax.axhline(-config.max_rolling_corr_recent, color=THRESH_R, linewidth=1, linestyle="-.")
+            ax.axvspan(recent_ts, x[-1], alpha=0.08, color=THRESH_R)
+            for period, row in roll.iterrows():
+                thresh = config.max_rolling_corr_recent if period > recent_cutoff else config.max_rolling_corr
+                if abs(row["pearson"]) > thresh or abs(row["spearman"]) > thresh:
+                    ax.axvline(period.to_timestamp(), color=THRESH, alpha=0.25, linewidth=1)
+        a_short = a_name.split("/")[-1]
+        b_short = b_name.split("/")[-1]
+        ax.set_title(f"{a_short}  ×  {b_short}", color=TEXT, fontsize=9, pad=4)
+        ax.set_ylabel("Correlation", color=TEXT, fontsize=8)
+        ax.legend(fontsize=7, facecolor=AX_BG, labelcolor=TEXT, loc="upper left")
+        ax.set_ylim(-1, 1)
+        ax.axhline(0, color=GRID, linewidth=0.8)
+
     for combo in combinations[:max_combos]:
-        names  = list(combo)
-        pairs  = [(names[i], names[j]) for i in range(len(names)) for j in range(i + 1, len(names))]
+        names   = list(combo)
+        pairs   = [(names[i], names[j]) for i in range(len(names)) for j in range(i + 1, len(names))]
         n_pairs = len(pairs)
 
-        fig, axes = plt.subplots(
-            n_pairs, 1,
-            figsize=(14, 4 * n_pairs),
-            facecolor=BG,
-            squeeze=False,
-        )
-        fig.suptitle(
-            f"Rolling {config.rolling_window_months}m Correlations\n"
-            + " | ".join(n.split("/")[-1] for n in names),
-            color=TEXT, fontsize=11, y=1.01,
-        )
-
-        # Determine recency cutoff once (use the latest period across all pairs)
-        all_periods = pd.concat(
-            [monthly_cache[n] for n in names], axis=0
-        ).index
+        all_periods = pd.concat([monthly_cache[n] for n in names], axis=0).index
         latest = all_periods.max()
         recent_cutoff = latest - config.recent_years * 12
 
-        for ax, (a_name, b_name) in zip(axes[:, 0], pairs):
-            roll = _rolling_correlations(
-                monthly_cache[a_name], monthly_cache[b_name], config.rolling_window_months
-            )
+        title_base = (f"Rolling {config.rolling_window_months}m Correlations  |  "
+                      + " · ".join(n.split("/")[-1] for n in names))
 
-            ax.set_facecolor(AX_BG)
-            ax.tick_params(colors=TEXT)
-            for spine in ax.spines.values():
-                spine.set_edgecolor(GRID)
-            ax.grid(True, color=GRID, linewidth=0.5)
+        if n_pairs <= max_pairs_detail:
+            # ── Detail view: one subplot per pair ────────────────────────────
+            n_cols = min(2, n_pairs)
+            n_rows = (n_pairs + n_cols - 1) // n_cols
+            fig, axes = plt.subplots(n_rows, n_cols,
+                                     figsize=(14, 4 * n_rows),
+                                     facecolor=BG, squeeze=False)
+            fig.suptitle(title_base, color=TEXT, fontsize=11)
 
-            if roll.empty:
-                ax.text(0.5, 0.5, "Insufficient data", transform=ax.transAxes,
-                        color=TEXT, ha="center")
-            else:
-                x = [p.to_timestamp() for p in roll.index]
-                ax.plot(x, roll["pearson"],  color=PEARSON,  linewidth=1.5, label="Pearson")
-                ax.plot(x, roll["spearman"], color=SPEARMAN, linewidth=1.5, label="Spearman", linestyle="--")
+            for idx, (a_name, b_name) in enumerate(pairs):
+                ax = axes[idx // n_cols][idx % n_cols]
+                _plot_pair(ax, a_name, b_name, recent_cutoff)
 
-                # Global threshold line
-                ax.axhline(config.max_rolling_corr, color=THRESH, linewidth=1,
-                           linestyle=":", label=f"Threshold ({config.max_rolling_corr})")
+            # Hide empty axes
+            for idx in range(n_pairs, n_rows * n_cols):
+                axes[idx // n_cols][idx % n_cols].set_visible(False)
 
-                # Recent threshold + shaded region
-                recent_ts = recent_cutoff.to_timestamp()
-                ax.axhline(config.max_rolling_corr_recent, color=THRESH_R, linewidth=1,
-                           linestyle="-.", label=f"Recent threshold ({config.max_rolling_corr_recent})")
-                ax.axvspan(recent_ts, x[-1], alpha=0.08, color=THRESH_R, label=f"Recent ({config.recent_years}y)")
+            plt.tight_layout()
+            plt.show()
 
-                # Highlight breaches
-                for period, row in roll.iterrows():
-                    thresh = config.max_rolling_corr_recent if period > recent_cutoff else config.max_rolling_corr
-                    if row["pearson"] > thresh or row["spearman"] > thresh:
-                        ax.axvline(period.to_timestamp(), color=THRESH, alpha=0.25, linewidth=1)
+        else:
+            # ── Compact view: heatmap of max |corr| + detail for top pairs ──
 
-            a_short = a_name.split("/")[-1]
-            b_short = b_name.split("/")[-1]
-            ax.set_title(f"{a_short}  ×  {b_short}", color=TEXT, fontsize=9, pad=4)
-            ax.set_ylabel("Correlation", color=TEXT, fontsize=8)
-            ax.legend(fontsize=7, facecolor=AX_BG, labelcolor=TEXT, loc="upper left")
-            ax.set_ylim(-1, 1)
-            ax.axhline(0, color=GRID, linewidth=0.8)
+            # Build max |corr| matrix
+            short_names = [n.split("/")[-1] for n in names]
+            n = len(names)
+            mat = np.zeros((n, n))
+            pair_max: list[tuple[float, str, str]] = []
 
-        plt.tight_layout()
-        plt.show()
+            for i, a_name in enumerate(names):
+                for j, b_name in enumerate(names):
+                    if i == j:
+                        mat[i, j] = 1.0
+                    elif j > i:
+                        roll = _rolling_correlations(
+                            monthly_cache[a_name], monthly_cache[b_name],
+                            config.rolling_window_months
+                        )
+                        if roll.empty:
+                            v = 0.0
+                        else:
+                            v = float(roll[["pearson", "spearman"]].abs().max().max())
+                        mat[i, j] = mat[j, i] = v
+                        pair_max.append((v, a_name, b_name))
+
+            fig_h, ax_h = plt.subplots(figsize=(max(8, n * 0.6 + 2), max(6, n * 0.5 + 2)),
+                                        facecolor=BG)
+            ax_h.set_facecolor(AX_BG)
+            im = ax_h.imshow(mat, cmap="RdYlGn_r", vmin=0, vmax=1, aspect="auto")
+            ax_h.set_xticks(range(n))
+            ax_h.set_yticks(range(n))
+            ax_h.set_xticklabels(short_names, rotation=45, ha="right", color=TEXT, fontsize=7)
+            ax_h.set_yticklabels(short_names, color=TEXT, fontsize=7)
+            ax_h.set_title(f"Max |Correlation| across all windows\n{title_base}",
+                           color=TEXT, fontsize=10)
+            for i in range(n):
+                for j in range(n):
+                    ax_h.text(j, i, f"{mat[i,j]:.2f}", ha="center", va="center",
+                              fontsize=6, color="black" if mat[i,j] < 0.7 else "white")
+            plt.colorbar(im, ax=ax_h, fraction=0.046, pad=0.04)
+            plt.tight_layout()
+            plt.show()
+
+            # Detail plots for the top max_pairs_detail pairs by max |corr|
+            pair_max.sort(reverse=True, key=lambda t: t[0])
+            top_pairs = [(a, b) for _, a, b in pair_max[:max_pairs_detail]]
+            n_top = len(top_pairs)
+            n_cols = min(2, n_top)
+            n_rows = (n_top + n_cols - 1) // n_cols
+            fig2, axes2 = plt.subplots(n_rows, n_cols,
+                                       figsize=(14, 4 * n_rows),
+                                       facecolor=BG, squeeze=False)
+            fig2.suptitle(f"Top {n_top} pairs by max |correlation|\n{title_base}",
+                          color=TEXT, fontsize=11)
+            for idx, (a_name, b_name) in enumerate(top_pairs):
+                ax = axes2[idx // n_cols][idx % n_cols]
+                _plot_pair(ax, a_name, b_name, recent_cutoff)
+            for idx in range(n_top, n_rows * n_cols):
+                axes2[idx // n_cols][idx % n_cols].set_visible(False)
+            plt.tight_layout()
+            plt.show()

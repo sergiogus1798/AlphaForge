@@ -138,26 +138,37 @@ def run_mae_stress(
 
 
 def stress_test_all(
-    portfolios: list[ValidPortfolio],
+    combinations,           # list[CombinationResult]
     config: PortfolioConfig,
     verbose: bool = True,
-) -> list[ValidPortfolio]:
+) -> None:
     """
-    Run MAE stress test on all valid portfolios and attach results.
-    Portfolios that fail are kept but marked as stress.passed=False.
-
-    Returns the same list with stress field populated on each portfolio.
+    Run MAE stress test on every ValidPortfolio across all CombinationResults.
+    Results are attached as vp.stress (StressResult).
+    Informational only — no portfolios are removed.
     """
     from tqdm import tqdm
+    from alphaforge.portfolio.generator.combo_result import METHODS
 
+    total = sum(
+        1 for cr in combinations
+        for vp in cr.portfolios.values()
+        if vp is not None
+    )
     passed_count = 0
-    for portfolio in tqdm(portfolios, desc="  MAE stress test", unit="portfolio", disable=not verbose):
-        result = run_mae_stress(portfolio, config)
-        portfolio.stress = result
-        if result.passed:
-            passed_count += 1
+
+    with tqdm(total=total, desc="  MAE stress test", unit="portfolio", disable=not verbose) as bar:
+        for cr in combinations:
+            for method in METHODS:
+                vp = cr.portfolios.get(method)
+                if vp is None:
+                    continue
+                result = run_mae_stress(vp, config)
+                vp.stress = result
+                if result.passed:
+                    passed_count += 1
+                bar.update(1)
 
     if verbose:
-        print(f"\n  MAE stress: {passed_count}/{len(portfolios)} portfolios survived.\n")
-
-    return portfolios
+        print(f"\n  MAE stress: {passed_count}/{total} portfolios would pass worst-case limits "
+              f"(informational — no portfolios removed).\n")

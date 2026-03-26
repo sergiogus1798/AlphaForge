@@ -40,20 +40,71 @@ CONSTRAINTS
    not dynamic day-to-day)
 
 
+PRE-COMPUTATION (done once at startup, before generation loop)
+--------------------------------------------------------------
+To make the generation loop fast, three N×N matrices are computed upfront
+(N = total number of strategies in the universe):
+
+  - Pearson matrix   [N × N] : monthly P&L Pearson correlation for every pair
+  - Spearman matrix  [N × N] : monthly P&L Spearman correlation for every pair
+  - Co-loss matrix   [N × N] : co-loss frequency for every pair
+
+During generation, checking a combo of K strategies is a pure O(K²) index
+lookup into these matrices — no recomputation per combo.
+
+Also pre-computed:
+  - Daily P&L matrix [days × N] : each strategy's closed-trade P&L per calendar day
+                                   Strategies not yet active on a given day contribute $0
+                                   (full date range used — e.g. FX from 2004, indices
+                                   from 2012 → combined matrix spans 2004–present,
+                                   indices columns are $0 before 2012)
+  - Monthly returns  [months × N]: aggregated from daily P&L, used for corr matrices
+                                   Pairwise correlation uses only overlapping months
+                                   (pandas default behaviour with NaN alignment)
+  - Same-asset overlap set: for each (strategy_i, strategy_j) pair, whether they
+    ever open a trade on the same asset on the same day (boolean pre-filter)
+
+DATE GAP HANDLING
+  - Portfolio simulation (F calculation, equity curve, MAE stress test) uses the
+    full available history. Strategies absent in early periods contribute $0 —
+    realistic, matches live deployment where strategies are added over time.
+  - Correlation matrices use pairwise overlapping months only. A FX/indices pair
+    will be correlated over their shared period (e.g. 2012–present) automatically.
+
+
 PIPELINE — 5 STEPS
 -------------------
 
 STEP 1 — Generate & Filter Combinations (base sizing: $100/trade, equal weight)
   - Randomly sample strategy combinations (n = min_strategies to max_strategies)
-  - For each combination, apply pairwise filters (reject if ANY pair fails):
-      a. Pearson correlation (monthly P&L)  > max_pearson_corr  → reject
-      b. Spearman correlation (monthly P&L) > max_spearman_corr → reject
-      c. Co-loss frequency                  > max_co_loss_freq  → reject
-      d. Same-asset same-day trade overlap  (any occurrence)    → reject
-  - Keep only combinations that pass all filters
+  - For each combination, apply pairwise filters using pre-computed matrices
+    (reject if ANY pair fails — short-circuit on first failure for speed):
+      a. Pearson correlation  > max_pearson_corr  → reject  (lookup in Pearson matrix)
+      b. Spearman correlation > max_spearman_corr → reject  (lookup in Spearman matrix)
+      c. Co-loss frequency    > max_co_loss_freq  → reject  (lookup in co-loss matrix)
+      d. Same-asset same-day trade overlap → reject         (lookup in overlap set)
+  - Compute F (scale factor) and basic metrics for survivors:
+      scale_factor   = daily_loss_limit_$ / abs(worst_combined_day_$)
+      scaled_sharpe  = Sharpe of combined daily P&L × scale_factor
+      scaled_max_dd  = max drawdown of combined equity × scale_factor
+  - Reject if scaled_max_dd > total_drawdown_limit
+  - Keep surviving combinations for Phase 2
   - Generation method: random sampling initially → upgrade to Genetic Algorithm later
 
-STEP 2 — Apply Weighting Method
+STEP 2 — Deep Correlation Analysis (on survivors only, via correlation_deep.py)
+  - Rolling Pearson correlation (6-month window): does diversification hold over time?
+    → This is the main quality gate — portfolios with high rolling correlation
+      in recent periods are deprioritised even if long-run average looks fine
+  - Tail correlation: Pearson computed only on the worst 10% of days
+    → Directly answers: "when things go bad, do they go bad together?"
+    → Most relevant metric for the daily loss constraint
+  - PCA on the portfolio's daily P&L matrix:
+      → PC1 explained variance: if > 70–80%, strategies are moving together
+      → N independent factors: how many truly independent bets are you running?
+  - Portfolios are scored and ranked on these deep metrics
+  - Weak portfolios filtered out here before expensive weighting step
+
+STEP 3 — Apply Weighting Method
   - For each surviving combination, compute strategy weights using one or more methods:
       a. Equal Weight       : all strategies get w_i = 1/n
       b. Min Variance       : minimize portfolio variance (covariance matrix of daily PnL)
@@ -64,19 +115,14 @@ STEP 2 — Apply Weighting Method
   - Weighted simulation: strategy_i runs at $100 × w_i × n_strategies
     (equal weight produces $100/trade; weights just redistribute the budget)
 
-STEP 3 — Find Critical Day & Re-scale
+STEP 4 — Find Critical Day, Re-scale & Validate Drawdown
   - Simulate combined portfolio day by day using CLOSED P&L (calendar day)
   - Find worst single day loss (in $) on the weighted portfolio
   - Compute scale factor:
       scale_factor = daily_loss_limit_$ / abs(worst_day_loss_$)
   - Apply scale to all strategies:
       final_risk_per_trade_i = $100 × w_i × n_strategies × scale_factor
-  - This maximizes position size while guaranteeing the worst historical day
-    fits exactly within the daily loss limit
-
-STEP 4 — Validate Total Drawdown
-  - Apply same scale_factor to the full combined equity curve
-  - Compute max drawdown on the rescaled curve
+  - Compute max drawdown on the rescaled equity curve
   - Reject portfolio if max_drawdown > total_drawdown_limit
   - Keep portfolios that pass → these are valid candidates
 
@@ -99,6 +145,23 @@ PORTFOLIO COMPARISON
   profit factor, consistency (rolling metrics)
 
 
+FILE STRUCTURE
+--------------
+alphaforge/
+  Portfolio/
+    __init__.py
+    universe.py          # Load strategies, build daily PnL matrix (full date range,
+                         # $0 fill for absent strategies), pre-compute all three
+                         # correlation matrices and overlap set — with progress prints
+    evaluator.py         # Fast per-combo: F, Sharpe, scaled DD — vectorized
+    correlation_deep.py  # Deep analysis on survivors: rolling Pearson, tail
+                         # correlation, PCA — runs after Step 1
+    generator.py         # BaseGenerator → RandomGenerator (GA slot for v2)
+    filter.py            # Criteria dataclass: all thresholds in one place
+    results.py           # PortfolioResult dataclass (fast metrics + deep metrics)
+    plot_portfolio.py    # Visualization panel
+
+
 NOTES
 -----
 - Calendar day (server time) used for daily loss calculation, matching
@@ -106,6 +169,7 @@ NOTES
 - Rolling 24h window not used (splits would differ from prop firm rules)
 - Genetic Algorithm or other optimization methods planned for v2 of generation
 - All portfolio scoring done after rescaling (apples-to-apples comparison)
+- Minimum overlap check not needed: all strategy backtests cover 15+ years
 
 
 ================================================================================

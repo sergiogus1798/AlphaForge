@@ -10,11 +10,14 @@ Full pipeline:
 Edit PortfolioConfig below to adjust all thresholds and parameters.
 """
 
+import matplotlib.pyplot as plt
+
 from alphaforge.loader.loader import load_folder
 from alphaforge.portfolio.config import PortfolioConfig
 from alphaforge.portfolio.generator.pipeline import run_pipeline
 from alphaforge.portfolio.stress.mae_stress import stress_test_all
 from alphaforge.portfolio.dashboard import run_portfolio_dashboard
+from alphaforge.portfolio.dashboard_corr import run_correlation_dashboard
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
@@ -61,10 +64,14 @@ print(f"\n  {len(strategies)} strategies loaded.\n")
 result = run_pipeline(strategies, config, verbose=True)
 
 if not result.succeeded:
-    print("  No valid portfolios generated. Adjust thresholds in RunPortfolio.py.")
+    print("  No combinations generated. Adjust thresholds in RunPortfolio.py.")
 else:
-    # Step 5: MAE stress test
-    stress_test_all(result.valid_portfolios, config, verbose=True)
+    # Step 5: MAE stress test (informational)
+    stress_test_all(result.combinations, config, verbose=True)
 
     # Launch dashboard
-    run_portfolio_dashboard(result.valid_portfolios, config, port=8060)
+    # Build all windows first (non-blocking), then show them all together
+    run_portfolio_dashboard(result.combinations, config, strategies=strategies, _show=False)
+    print("  Launching deep correlation analysis...")
+    run_correlation_dashboard(result.combinations, config, strategies, _show=False)
+    plt.show()   # blocks here; all windows open simultaneously
