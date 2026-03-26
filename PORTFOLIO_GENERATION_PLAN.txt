@@ -1,0 +1,111 @@
+================================================================================
+ALPHAFORGE — PORTFOLIO GENERATION MODULE: DESIGN PLAN
+================================================================================
+
+GOAL
+----
+Given a pool of pre-validated profitable strategies (CSVs), find combinations
+of 3–10 strategies with optimal weights that maximize position size while
+surviving prop firm constraints.
+
+All backtests are done risking $100/trade (base unit).
+
+
+INPUTS (configurable)
+---------------------
+- account_balance         : e.g. $10,000
+- daily_loss_limit        : e.g. 4% → $400
+- total_drawdown_limit    : e.g. 8–9% → $800–$900
+- min_strategies          : 3   (minimum strategies per portfolio)
+- max_strategies          : 10  (maximum strategies per portfolio)
+
+Correlation filter thresholds (all configurable):
+- max_pearson_corr        : 0.30  (monthly P&L, linear correlation)
+- max_spearman_corr       : 0.40  (monthly P&L, rank/monotonic correlation)
+- max_co_loss_freq        : 0.10  (fraction of months both strategies lose simultaneously)
+- same_asset_same_day     : True  (hard rule: no two strategies open on same asset same day)
+
+
+CONSTRAINTS
+-----------
+1. Pearson correlation (monthly P&L) between any two strategies ≤ max_pearson_corr
+2. Spearman correlation (monthly P&L) between any two strategies ≤ max_spearman_corr
+3. Co-loss frequency between any two strategies ≤ max_co_loss_freq
+   (co_loss = months where both A < 0 AND B < 0 / total_months — observed, no assumptions)
+4. No two strategies open a trade on the same asset on the same day (configurable:
+   can tighten to same bar)
+5. Daily loss ≤ daily_loss_limit (calendar day, server time)
+6. Total drawdown ≤ total_drawdown_limit
+7. Position sizes must be fixed/static (set at portfolio construction time,
+   not dynamic day-to-day)
+
+
+PIPELINE — 5 STEPS
+-------------------
+
+STEP 1 — Generate & Filter Combinations (base sizing: $100/trade, equal weight)
+  - Randomly sample strategy combinations (n = min_strategies to max_strategies)
+  - For each combination, apply pairwise filters (reject if ANY pair fails):
+      a. Pearson correlation (monthly P&L)  > max_pearson_corr  → reject
+      b. Spearman correlation (monthly P&L) > max_spearman_corr → reject
+      c. Co-loss frequency                  > max_co_loss_freq  → reject
+      d. Same-asset same-day trade overlap  (any occurrence)    → reject
+  - Keep only combinations that pass all filters
+  - Generation method: random sampling initially → upgrade to Genetic Algorithm later
+
+STEP 2 — Apply Weighting Method
+  - For each surviving combination, compute strategy weights using one or more methods:
+      a. Equal Weight       : all strategies get w_i = 1/n
+      b. Min Variance       : minimize portfolio variance (covariance matrix of daily PnL)
+      c. Risk Parity        : each strategy contributes equally to total portfolio risk
+                              (weight inversely proportional to individual volatility)
+      d. HRP (Hierarchical  : hierarchical clustering on correlation matrix,
+         Risk Parity)         then recursive bisection for allocation
+  - Weighted simulation: strategy_i runs at $100 × w_i × n_strategies
+    (equal weight produces $100/trade; weights just redistribute the budget)
+
+STEP 3 — Find Critical Day & Re-scale
+  - Simulate combined portfolio day by day using CLOSED P&L (calendar day)
+  - Find worst single day loss (in $) on the weighted portfolio
+  - Compute scale factor:
+      scale_factor = daily_loss_limit_$ / abs(worst_day_loss_$)
+  - Apply scale to all strategies:
+      final_risk_per_trade_i = $100 × w_i × n_strategies × scale_factor
+  - This maximizes position size while guaranteeing the worst historical day
+    fits exactly within the daily loss limit
+
+STEP 4 — Validate Total Drawdown
+  - Apply same scale_factor to the full combined equity curve
+  - Compute max drawdown on the rescaled curve
+  - Reject portfolio if max_drawdown > total_drawdown_limit
+  - Keep portfolios that pass → these are valid candidates
+
+STEP 5 — MAE Stress Test (post-generation validation)
+  - Take generated portfolios from Step 4
+  - Replace each trade's closed P&L with its MAE (maximum adverse excursion)
+  - Re-simulate the portfolio day by day with MAE values
+  - Re-check daily loss limit and total drawdown limit
+  - This gives the worst-case scenario: "if everything went against you
+    simultaneously, would this portfolio still survive?"
+  - Portfolios that survive MAE stress test are the most robust candidates
+
+
+PORTFOLIO COMPARISON
+--------------------
+- All portfolios are scored on the same footing: same account, same limits
+- Each weighting method (equal, min var, risk parity, HRP) produces a
+  different portfolio from the same strategy combination → all are comparable
+- Metrics to rank portfolios: Sharpe ratio, Calmar ratio, max drawdown,
+  profit factor, consistency (rolling metrics)
+
+
+NOTES
+-----
+- Calendar day (server time) used for daily loss calculation, matching
+  prop firm enforcement
+- Rolling 24h window not used (splits would differ from prop firm rules)
+- Genetic Algorithm or other optimization methods planned for v2 of generation
+- All portfolio scoring done after rescaling (apples-to-apples comparison)
+
+
+================================================================================
