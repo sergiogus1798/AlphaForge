@@ -119,6 +119,39 @@ def spearman_filter(
     return abs(corr) <= threshold
 
 
+def tail_correlation_filter(
+    a_monthly: pd.Series,
+    b_monthly: pd.Series,
+    tail_percentile: float,
+    threshold: float,
+) -> bool:
+    """
+    True (PASS) if correlation during tail months stays within threshold.
+
+    Tail months are defined as months where EITHER strategy falls below its
+    own `tail_percentile` quantile of P&L — i.e. one of them is having a
+    bad month. This directly measures how correlated the losses are during
+    stress periods, which matters most for prop firm drawdown limits.
+
+    Returns True (pass) if fewer than 4 tail months exist (insufficient data).
+    """
+    a, b = _align_monthly(a_monthly, b_monthly)
+    if len(a) < 6:
+        return True
+
+    a_thresh = a.quantile(tail_percentile)
+    b_thresh = b.quantile(tail_percentile)
+    tail_mask = (a <= a_thresh) | (b <= b_thresh)
+    tail_a = a[tail_mask]
+    tail_b = b[tail_mask]
+
+    if len(tail_a) < 4:
+        return True
+
+    corr, _ = pearsonr(tail_a.values, tail_b.values)
+    return abs(corr) <= threshold
+
+
 def co_loss_filter(
     a_monthly: pd.Series,
     b_monthly: pd.Series,
@@ -209,6 +242,7 @@ class FilterStats:
     rejected_pearson: int = 0
     rejected_spearman: int = 0
     rejected_co_loss: int = 0
+    rejected_tail_corr: int = 0
     rejected_same_asset: int = 0
     rejected_dd: int = 0
     rejected_rolling: int = 0
@@ -223,6 +257,7 @@ class FilterStats:
         print(f"    ↳ Pearson            : {self.rejected_pearson} rejected")
         print(f"    ↳ Spearman           : {self.rejected_spearman} rejected")
         print(f"    ↳ Co-loss frequency  : {self.rejected_co_loss} rejected")
+        print(f"    ↳ Tail correlation   : {self.rejected_tail_corr} rejected")
         print(f"    ↳ Same-asset conflict: {self.rejected_same_asset} rejected")
         print(f"  Passed DD check        : {self.passed_dd}  ({rej_dd} rejected)")
         print(f"  Passed rolling filters : {self.passed_rolling}  ({rej_rolling} rejected)")
@@ -264,6 +299,12 @@ def _apply_static_filters(
                 if universe.has_overlap(a_name, b_name):
                     stats.rejected_same_asset += 1
                     return False
+                # Tail correlation is not pre-computed in Universe — always computed live
+                a_m = monthly_cache[a_name]
+                b_m = monthly_cache[b_name]
+                if not tail_correlation_filter(a_m, b_m, config.tail_percentile, config.max_tail_corr):
+                    stats.rejected_tail_corr += 1
+                    return False
             else:
                 # Fallback: compute from raw monthly series
                 a_m = monthly_cache[a_name]
@@ -277,6 +318,9 @@ def _apply_static_filters(
                     return False
                 if not co_loss_filter(a_m, b_m, config.max_co_loss_freq):
                     stats.rejected_co_loss += 1
+                    return False
+                if not tail_correlation_filter(a_m, b_m, config.tail_percentile, config.max_tail_corr):
+                    stats.rejected_tail_corr += 1
                     return False
                 if not same_asset_conflict_filter(
                     strategies[a_name], strategies[b_name], config.same_asset_same_day
@@ -344,7 +388,8 @@ def filter_static_only(
     if verbose:
         print(f"\n  Static filters: {len(static_passed)}/{len(combinations)} passed "
               f"(Pearson: {stats.rejected_pearson}, Spearman: {stats.rejected_spearman}, "
-              f"Co-loss: {stats.rejected_co_loss}, Same-asset: {stats.rejected_same_asset} rejected)\n")
+              f"Co-loss: {stats.rejected_co_loss}, Tail: {stats.rejected_tail_corr}, "
+              f"Same-asset: {stats.rejected_same_asset} rejected)\n")
 
     return static_passed, monthly_cache, stats
 

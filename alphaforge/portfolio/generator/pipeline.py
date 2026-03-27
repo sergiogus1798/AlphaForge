@@ -36,6 +36,7 @@ from alphaforge.portfolio.generator.weighting import (
 from alphaforge.portfolio.generator.scaler import rescale
 from alphaforge.portfolio.generator.validator import validate, ValidPortfolio
 from alphaforge.portfolio.generator.combo_result import CombinationResult
+from alphaforge.portfolio.generator.fitness import score_combinations
 
 
 # ── Step 3: Raw DD check (equal-weight scaled) ────────────────────────────────
@@ -118,44 +119,44 @@ def _raw_dd_filter(
     return passed, equal_vps
 
 
-# ── Step 5: Rank by return/DD ─────────────────────────────────────────────────
+# ── Step 5: Rank by fitness score ────────────────────────────────────────────
 
 def _rank_combinations(
     combinations: list[tuple[str, ...]],
     equal_vps: dict[tuple, ValidPortfolio],
     config: PortfolioConfig,
     verbose: bool = True,
-) -> list[tuple[tuple[str, ...], ValidPortfolio]]:
+) -> list[tuple[tuple[str, ...], ValidPortfolio, float]]:
     """
-    Sort rolling-passed combinations by equal-weight return/DD (descending).
-    Return the top config.top_combinations.
+    Score rolling-passed combinations with the composite fitness function
+    (return/DD × w1 + annual return × w2 + winning months × w3),
+    all normalised across the pool. Returns the top config.top_combinations.
     """
-    ranked = sorted(
-        [
-            (combo, equal_vps[combo],
-             equal_vps[combo].metrics.get("return_dd_ratio", 0.0))
-            for combo in combinations
-            if combo in equal_vps
-        ],
-        key=lambda x: x[2],
-        reverse=True,
-    )
+    candidates = [
+        (combo, equal_vps[combo])
+        for combo in combinations
+        if combo in equal_vps
+    ]
 
-    top = ranked[: config.top_combinations]
+    scored = score_combinations(candidates, config)
+    top    = scored[: config.top_combinations]
 
     if verbose and top:
         print(
-            f"  Ranking: {len(ranked)} combination(s), top {len(top)} selected  "
-            f"(R/DD: {top[-1][2]:.2f}–{top[0][2]:.2f}).\n"
+            f"  Ranking: {len(scored)} combination(s), top {len(top)} selected  "
+            f"(fitness: {top[-1][2]:.4f}–{top[0][2]:.4f}, "
+            f"weights R/DD={config.fitness_weight_return_dd:.0%} "
+            f"ret={config.fitness_weight_annual_return:.0%} "
+            f"win_mo={config.fitness_weight_winning_months:.0%}).\n"
         )
 
-    return [(combo, vp) for combo, vp, _ in top]
+    return top  # list of (combo, vp, fitness_score)
 
 
 # ── Step 6: Apply all 4 weighting methods ────────────────────────────────────
 
 def _build_combination_results(
-    top_ranked: list[tuple[tuple[str, ...], ValidPortfolio]],
+    top_ranked: list[tuple[tuple[str, ...], ValidPortfolio, float]],
     strategies: dict,
     config: PortfolioConfig,
     verbose: bool = True,
@@ -163,7 +164,7 @@ def _build_combination_results(
     """
     For each combination, apply min_variance / risk_parity / hrp.
     (equal is already computed and passed in.)
-    Returns list of CombinationResult sorted by raw_return_dd descending.
+    Returns list of CombinationResult sorted by fitness_score descending.
     """
     results: list[CombinationResult] = []
 
@@ -173,7 +174,7 @@ def _build_combination_results(
         unit="combo",
         disable=not verbose,
     ) as bar:
-        for rank_idx, (combo, equal_vp) in enumerate(bar, 1):
+        for rank_idx, (combo, equal_vp, fitness) in enumerate(bar, 1):
             portfolios: dict = {"equal": equal_vp}
 
             weights_all = compute_all_weights(combo, strategies)
@@ -181,7 +182,7 @@ def _build_combination_results(
                 weights   = weights_all[method]
                 portfolio = build_weighted_portfolio(combo, strategies, weights)
                 scaled    = rescale(combo, method, weights, portfolio, config)
-                portfolios[method] = validate(scaled, config)  # None if DD exceeded
+                portfolios[method] = validate(scaled, config)
 
             results.append(CombinationResult(
                 combination   = combo,
@@ -189,6 +190,7 @@ def _build_combination_results(
                 raw_return_dd = equal_vp.metrics.get("return_dd_ratio", 0.0),
                 raw_metrics   = equal_vp.metrics,
                 portfolios    = portfolios,
+                fitness_score = fitness,
             ))
 
     return results
@@ -234,6 +236,7 @@ class PipelineResult:
             "pearson"    : sum(s.rejected_pearson    for s in self.total_filter_stats),
             "spearman"   : sum(s.rejected_spearman   for s in self.total_filter_stats),
             "co_loss"    : sum(s.rejected_co_loss    for s in self.total_filter_stats),
+            "tail_corr"  : sum(s.rejected_tail_corr  for s in self.total_filter_stats),
             "same_asset" : sum(s.rejected_same_asset for s in self.total_filter_stats),
             "dd"         : sum(s.rejected_dd         for s in self.total_filter_stats),
             "rolling"    : sum(s.rejected_rolling    for s in self.total_filter_stats),
@@ -248,6 +251,7 @@ class PipelineResult:
             "pearson"    : "Pearson correlation     → lower max_pearson_corr",
             "spearman"   : "Spearman correlation    → lower max_spearman_corr",
             "co_loss"    : "Co-loss frequency       → raise max_co_loss_freq",
+            "tail_corr"  : "Tail correlation        → raise max_tail_corr or lower tail_percentile",
             "same_asset" : "Same-asset conflict     → set same_asset_same_day=False",
             "dd"         : "Total drawdown (DD check)→ raise total_drawdown_limit_pct",
             "rolling"    : "Rolling correlation     → raise max_rolling_corr / max_rolling_corr_recent",
@@ -362,8 +366,8 @@ def run_pipeline(
 
         break  # first successful round — stop
 
-    # Sort by raw return/DD descending
-    all_combos.sort(key=lambda cr: cr.raw_return_dd, reverse=True)
+    # Sort by fitness score descending
+    all_combos.sort(key=lambda cr: cr.fitness_score, reverse=True)
 
     result = PipelineResult(
         combinations       = all_combos,

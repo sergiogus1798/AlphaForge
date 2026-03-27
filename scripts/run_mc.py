@@ -2,7 +2,7 @@
 run_mc.py — Launch the Monte Carlo dashboard for AlphaForge.
 
 Usage:
-    python run_mc.py                        # defaults to TradingData/
+    python run_mc.py                        # defaults to strategies/approved/
     python run_mc.py <path_to_folder>
 """
 
@@ -10,7 +10,7 @@ import sys
 from alphaforge.loader import load_folder
 from alphaforge.IndividualAnalysis.MonteCarlo.dashboard import run_mc_dashboard
 
-DEFAULT_FOLDER = "TradingData"
+DEFAULT_FOLDER = "strategies/approved"
 
 
 if __name__ == "__main__":

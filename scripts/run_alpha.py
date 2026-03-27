@@ -1,7 +1,7 @@
 """
 run_alpha.py — Launch the core Alpha Detection tool.
 
-Loads strategy trades from TradingData/, loads the matching D1 price file
+Loads strategy trades from strategies/approved/, loads the matching D1 price file
 from AssetsData/, then opens the alpha detection figure (6-subplot dark theme).
 
 Usage:
@@ -17,7 +17,7 @@ from alphaforge.loader import load_folder
 from alphaforge.IndividualAnalysis.AlphaDetection.data_cleaner import load_price_data
 from alphaforge.IndividualAnalysis.AlphaDetection import AlphaDetector, plot_alpha_report
 
-DEFAULT_FOLDER  = "TradingData"
+DEFAULT_FOLDER  = "strategies/approved"
 DEFAULT_CAPITAL = 10_000.0
 
 
@@ -49,7 +49,7 @@ if __name__ == "__main__":
     # ── Load strategies ────────────────────────────────────────────────────────
     strategies = load_folder(DEFAULT_FOLDER)
     if not strategies:
-        print("No strategies found in TradingData/. Exiting.")
+        print("No strategies found in strategies/approved/. Exiting.")
         sys.exit(1)
 
     strategy_name, trades_df = _pick_strategy(strategies, key)

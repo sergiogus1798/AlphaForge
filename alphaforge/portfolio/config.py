@@ -25,6 +25,8 @@ class PortfolioConfig:
     max_spearman_corr: float = 0.40          # monthly P&L, rank/monotonic
     max_co_loss_freq: float = 0.20           # fraction of months both strategies lose
     same_asset_same_day: bool = True         # True = same day; False = tighten to same bar
+    tail_percentile: float = 0.20            # bottom N% of months used for tail correlation
+    max_tail_corr: float = 0.50             # max allowed correlation during tail months
 
     # ── Rolling correlation filter thresholds ────────────────────────────────
     rolling_window_months: int = 36          # size of each rolling window (months)
@@ -32,11 +34,26 @@ class PortfolioConfig:
     max_rolling_corr_recent: float = 0.30    # windows within the recent period must be below this
     recent_years: int = 3                    # trailing years considered "recent"
 
-    # ── Generation parameters ────────────────────────────────────────────────
-    n_portfolios: int = 50000                # number of random combinations to attempt
+    # ── Fitness function weights (must sum to 1.0) ───────────────────────────
+    fitness_weight_return_dd:      float = 0.60  # return / max-drawdown ratio
+    fitness_weight_annual_return:  float = 0.30  # annualised % return
+    fitness_weight_winning_months: float = 0.10  # fraction of months with positive P&L
+
+    # ── Random generation parameters ─────────────────────────────────────────
+    n_portfolios: int = 250000                # number of random combinations to attempt
     max_rounds: int = 5                      # auto-regeneration rounds if all portfolios rejected
     random_seed: int | None = None
     top_combinations: int = 50               # top-N combos (by equal-weight return/DD) to weight
+
+    # ── Genetic algorithm parameters ─────────────────────────────────────────
+    ga_population_size: int = 50             # individuals per generation
+    ga_generations: int = 150               # maximum number of generations
+    ga_elite_fraction: float = 0.10          # top fraction that survive unchanged each generation
+    ga_tournament_size: int = 5              # contestants per tournament selection
+    ga_crossover_prob: float = 0.80          # probability of crossover vs random new individual
+    ga_mutation_prob: float = 0.40           # probability of mutating an offspring
+    ga_max_stagnation: int = 25              # stop early if best fitness unchanged for N generations
+    ga_seed_attempts_multiplier: int = 8000 # random attempts per individual during seeding (target × this)
 
     # ── Computed properties ──────────────────────────────────────────────────
     @property

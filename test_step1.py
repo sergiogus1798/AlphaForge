@@ -1,7 +1,7 @@
 """
 test_step1.py — Quick test of the Step 1 portfolio generation pipeline.
 
-Loads all strategies from TradingData/, samples combinations, runs static +
+Loads all strategies from strategies/approved/, samples combinations, runs static +
 rolling correlation filters, reports results, and plots rolling correlations
 for the static survivors so you can inspect why they failed the rolling stage.
 """
@@ -25,7 +25,7 @@ print("=" * 60)
 print("  AlphaForge — Step 1 Test")
 print("=" * 60)
 
-strategies = load_folder("TradingData")
+strategies = load_folder("strategies/approved")
 print(f"\n  {len(strategies)} strategies loaded.\n")
 
 # ── Sample combinations ───────────────────────────────────────────────────────

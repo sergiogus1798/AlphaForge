@@ -34,7 +34,7 @@ print("=" * 70)
 print("  AlphaForge — Step 2 + 3: Weighting & Rescaling Test")
 print("=" * 70)
 
-strategies = load_folder("TradingData")
+strategies = load_folder("strategies/approved")
 print(f"\n  {len(strategies)} strategies loaded.\n")
 
 # ── Pick a portfolio (relaxed thresholds — correlation irrelevant for this test)

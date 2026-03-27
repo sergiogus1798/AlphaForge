@@ -13,7 +13,7 @@ from alphaforge.IndividualAnalysis.Distribution.plot_distribution_panel import (
     plot_distribution_panel,
 )
 
-DEFAULT_FOLDER   = "TradingData"
+DEFAULT_FOLDER   = "strategies/approved"
 INITIAL_CAPITAL  = 10_000.0
 PORTFOLIO_KEY    = "\u25c6 Portfolio (All)"
 

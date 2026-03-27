@@ -37,12 +37,15 @@ class CombinationResult:
 
     `raw_metrics` and `raw_return_dd` come from the equal-weight scaled
     portfolio used to rank combinations before applying the other methods.
+    `fitness_score` is the normalised composite score used for ranking
+    (return/DD × w1 + annual return × w2 + winning months × w3).
     """
     combination   : tuple[str, ...]
-    rank          : int                  # 1-based rank by raw return/DD
-    raw_return_dd : float                # equal-weight scaled return/DD
+    rank          : int                  # 1-based rank by fitness score
+    raw_return_dd : float                # equal-weight scaled return/DD (kept for display)
     raw_metrics   : dict                 # full metrics of equal-weight scaled portfolio
     portfolios    : dict                 # method -> ValidPortfolio | None
+    fitness_score : float = 0.0         # composite normalised fitness score
 
     # ── Convenience ───────────────────────────────────────────────────────────
 

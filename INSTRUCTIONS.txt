@@ -1,0 +1,108 @@
+================================================================================
+  AlphaForge — Instructions
+================================================================================
+
+FOLDER STRUCTURE
+----------------
+  strategies/
+    raw/          Drop new SQX exports here (not yet analysed).
+    approved/     Strategies that passed individual analysis.
+                  The portfolio generator reads from here.
+
+  portfolios/     Auto-generated. Wiped before every portfolio run.
+                  One subfolder per top combination found:
+
+                  portfolios/
+                    Combination001/
+                      strategies/     Raw CSV files for this combination.
+                      Equal/          Excel + PDF report (equal weight).
+                      HRP/            Excel + PDF report (HRP weight).
+                      MinVariance/    Excel + PDF report (min-variance).
+                      RiskParity/     Excel + PDF report (risk parity).
+                    Combination002/
+                      ...
+
+  AssetsData/     D1 price CSVs used by the alpha / regime analysis tools.
+
+
+--------------------------------------------------------------------------------
+WORKFLOW
+--------------------------------------------------------------------------------
+
+STEP 1 — Analyse strategies individually
+-----------------------------------------
+Before adding a strategy to the approved folder, run the individual tools
+to check whether it has real alpha:
+
+  python scripts/run_equity.py "AUDJPY/Strategy 7"       # equity curve
+  python scripts/run_alpha.py  "AUDJPY/Strategy 7"       # alpha detection
+  python scripts/run_distribution.py "AUDJPY/Strategy 7" # return distribution
+  python scripts/run_regime.py "AUDJPY/Strategy 7"       # regime analysis
+  python scripts/run_advanced.py "AUDJPY/Strategy 7"     # advanced alpha tests
+  python scripts/run_rolling_alpha.py "AUDJPY/Strategy 7"# rolling alpha/beta
+  python scripts/run_mc.py "AUDJPY/Strategy 7"           # Monte Carlo
+
+All scripts default to strategies/approved/ unless you pass a folder path.
+You can omit the strategy key to auto-pick the first one found.
+
+Once happy, move the CSV from strategies/raw/ to strategies/approved/.
+
+
+STEP 2 — Generate portfolios
+------------------------------
+  python run_portfolio.py
+
+  Options:
+    --capital     <amount>    Account balance in USD  (default: 10000)
+    --daily-limit <pct>       Daily loss limit in %   (default: 4)
+    --total-limit <pct>       Max total drawdown in % (default: 9)
+    --min         <n>         Min strategies per portfolio (default: 3)
+    --max         <n>         Max strategies per portfolio (default: 8)
+    --portfolios  <n>         Combinations to sample    (default: 10000)
+    --seed        <n>         Random seed for reproducibility
+
+  Example:
+    python run_portfolio.py --capital 50000 --min 4 --max 7 --portfolios 50000
+
+  What it does:
+    1. Cleans the portfolios/ folder.
+    2. Loads all strategies from strategies/approved/.
+    3. Filters combinations by correlation, drawdown, and MAE stress test.
+    4. Saves the top combinations to portfolios/ (strategy CSVs + reports).
+    5. Opens three analysis dashboards (correlation, portfolio, Monte Carlo).
+
+
+STEP 3 — Analyse results (coming soon: run_analysis.py)
+---------------------------------------------------------
+  python run_analysis.py portfolios/
+      → All combinations with navigator (same as after Step 2).
+
+  python run_analysis.py portfolios/Combination001/strategies/
+      → Single combination deep-dive.
+
+  python run_analysis.py strategies/approved/AUDJPY/Strategy\ 7.csv
+      → Full individual analysis for one strategy.
+
+  You can also create any folder, drop strategy CSVs in it, and point
+  run_analysis.py at it — no need to run the generator first.
+
+
+--------------------------------------------------------------------------------
+TIPS
+--------------------------------------------------------------------------------
+  - TradingData/ is kept for backwards compatibility but is no longer used.
+    New strategies should go into strategies/raw/ or strategies/approved/.
+
+  - portfolios/ is wiped automatically on every run_portfolio.py run.
+    If you want to keep a set of results, copy the folder elsewhere first.
+
+  - All scripts can be run from the project root:
+      cd /path/to/AlphaForge
+      python run_portfolio.py
+
+  - Qt display error on Linux? Run:
+      sudo apt-get install libxcb-cursor0
+    Or set:
+      export QT_QPA_PLATFORM=wayland
+
+================================================================================

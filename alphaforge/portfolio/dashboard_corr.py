@@ -46,6 +46,11 @@ RED    = "#e74c3c"
 TEXT   = "#e0e0e0"
 DIM    = "#888888"
 
+# PCA panels use a light background so tick labels remain readable
+PCA_BG   = "#eef0f8"
+PCA_TEXT = "#1a1a2a"
+PCA_GRID = "#b0b4cc"
+
 
 # ── Data helpers ───────────────────────────────────────────────────────────────
 
@@ -247,20 +252,22 @@ def _draw_pca(
 
     # ── Scree plot ─────────────────────────────────────────────────────────────
     ax_scree.cla()
-    _style(ax_scree)
+    ax_scree.set_facecolor(PCA_BG)
+    for sp in ax_scree.spines.values():
+        sp.set_edgecolor(PCA_GRID)
+    ax_scree.tick_params(colors=PCA_TEXT, labelsize=7)
 
     ax_scree.bar(components, explained[:n_show], color=CYAN, alpha=0.82, zorder=2)
-    ax_scree.set_xlabel("Component", color=TEXT, fontsize=8)
-    ax_scree.set_ylabel("Expl. Var %", color=CYAN, fontsize=8)
-    ax_scree.set_title("PCA — Scree", color=TEXT, fontsize=9)
+    ax_scree.set_xlabel("Component", color=PCA_TEXT, fontsize=8)
+    ax_scree.set_ylabel("Expl. Var %", color="#0080aa", fontsize=8)
+    ax_scree.set_title("PCA — Scree", color=PCA_TEXT, fontsize=9)
     ax_scree.set_xticks(components)
-    ax_scree.grid(True, color=BORDER, lw=0.4, zorder=0)
-    ax_scree.tick_params(colors=TEXT, labelsize=7)
+    ax_scree.grid(True, color=PCA_GRID, lw=0.4, zorder=0)
 
     ax2 = ax_scree.twinx()
     ax2.plot(components, cumulative[:n_show],
              color=AMBER, lw=2, marker="o", markersize=4, zorder=3)
-    ax2.axhline(80, color=DIM, ls="--", lw=0.8, alpha=0.7)
+    ax2.axhline(80, color="#999999", ls="--", lw=0.8, alpha=0.7)
     ax2.set_ylim(0, 108)
     ax2.set_ylabel("Cumul. %", color=AMBER, fontsize=7.5)
     ax2.tick_params(colors=AMBER, labelsize=7)
@@ -269,11 +276,14 @@ def _draw_pca(
     # Annotate bars with explained %
     for i, v in enumerate(explained[:n_show]):
         ax_scree.text(i + 1, v + 0.8, f"{v:.1f}%",
-                      ha="center", va="bottom", color=TEXT, fontsize=6.5)
+                      ha="center", va="bottom", color=PCA_TEXT, fontsize=6.5)
 
     # ── Loadings heatmap ───────────────────────────────────────────────────────
     ax_load.cla()
-    _style(ax_load)
+    ax_load.set_facecolor(PCA_BG)
+    for sp in ax_load.spines.values():
+        sp.set_edgecolor(PCA_GRID)
+    ax_load.tick_params(colors=PCA_TEXT, labelsize=7)
 
     load_data = loadings.iloc[:n_show, :].values
     n_strat   = load_data.shape[1]
@@ -281,12 +291,12 @@ def _draw_pca(
     im = ax_load.imshow(load_data, cmap="RdYlGn_r",
                         vmin=-1, vmax=1, aspect="auto")
     ax_load.set_yticks(range(n_show))
-    ax_load.set_yticklabels(loadings.index[:n_show], color=TEXT, fontsize=7)
+    ax_load.set_yticklabels(loadings.index[:n_show], color=PCA_TEXT, fontsize=7)
     ax_load.set_xticks(range(n_strat))
     ax_load.set_xticklabels(
-        loadings.columns, rotation=40, ha="right", color=TEXT, fontsize=7,
+        loadings.columns, rotation=40, ha="right", color=PCA_TEXT, fontsize=7,
     )
-    ax_load.set_title("PCA Loadings  (component × strategy)", color=TEXT, fontsize=9)
+    ax_load.set_title("PCA Loadings  (component × strategy)", color=PCA_TEXT, fontsize=9)
 
     for i in range(n_show):
         for j in range(n_strat):

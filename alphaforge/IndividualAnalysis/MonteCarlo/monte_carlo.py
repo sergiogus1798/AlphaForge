@@ -591,6 +591,76 @@ def extract_portfolio_stats(
     return {"overall": overall, "by_period": by_period}
 
 
+# ── Daily Bootstrap / Reshuffle ───────────────────────────────────────────────
+
+def run_daily_bootstrap(
+    df: pd.DataFrame,
+    n_simulations: int = 10_000,
+    replace: bool = True,
+    initial_capital: float = 10_000,
+    seed: int = None,
+    progress_fn=None,
+) -> pd.DataFrame:
+    """
+    Bootstrap daily P&L with or without replacement.
+
+    replace=True  → sample n days with replacement (bootstrap); some days repeat,
+                    others absent — distribution of outcomes varies.
+    replace=False → shuffle the daily P&L sequence (reshuffle); every day appears
+                    exactly once, only the order changes.
+
+    Operates on aggregated daily P&L, not individual trades.  Use this when
+    you care about day-level exposure rather than trade-level dependency.
+    """
+    rng   = np.random.default_rng(seed)
+    df_s  = df.sort_values("Close time")
+    daily = df_s.groupby(df_s["Close time"].dt.date)["Profit/Loss"].sum().values
+    n     = len(daily)
+    tick  = max(1, n_simulations // 200)
+    results = []
+    for i in range(n_simulations):
+        sampled = rng.choice(daily, size=n, replace=replace)
+        results.append(_equity_stats(sampled, initial_capital))
+        if progress_fn and (i + 1) % tick == 0:
+            progress_fn(i + 1, n_simulations)
+    return pd.DataFrame(results)
+
+
+# ── Block Reshuffle (without replacement) ─────────────────────────────────────
+
+def run_block_reshuffle(
+    df: pd.DataFrame,
+    n_simulations: int = 10_000,
+    block_size: int = 10,
+    skip_trade_probability: float = 0.05,
+    initial_capital: float = 10_000,
+    seed: int = None,
+    progress_fn=None,
+) -> pd.DataFrame:
+    """
+    Permute trade blocks without replacement.
+
+    Unlike block bootstrapping (which samples blocks with replacement, so some
+    blocks repeat and others are absent), this shuffles the block order while
+    keeping every trade exactly once.  Preserves local trade dependencies
+    (e.g. volatility clustering) while randomising the chronological regime.
+    """
+    rng    = np.random.default_rng(seed)
+    pnl    = df.sort_values("Close time")["Profit/Loss"].dropna().values
+    blocks = [pnl[i:i + block_size] for i in range(0, len(pnl), block_size)]
+    n_blk  = len(blocks)
+    tick   = max(1, n_simulations // 200)
+    results = []
+    for i in range(n_simulations):
+        idx = rng.permutation(n_blk)
+        seq = np.concatenate([blocks[j] for j in idx])
+        seq = _apply_skip(seq, skip_trade_probability, rng)
+        results.append(_equity_stats(seq, initial_capital))
+        if progress_fn and (i + 1) % tick == 0:
+            progress_fn(i + 1, n_simulations)
+    return pd.DataFrame(results)
+
+
 # ── Legacy API ─────────────────────────────────────────────────────────────────
 
 def original_metrics(df: pd.DataFrame) -> dict:

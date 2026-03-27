@@ -6,7 +6,7 @@ All public functions accept a DataFrame of trades with at least:
     - 'Open time'    (datetime)
     - 'Close time'   (datetime)
 
-compute_metrics() is the main entry point — returns a dict with all 19 metrics.
+compute_metrics() is the main entry point — returns a dict with all 20 metrics.
 metrics_table()   wraps multiple strategies into a single comparison DataFrame.
 """
 
@@ -56,6 +56,22 @@ def _max_consecutive(mask: pd.Series) -> int:
 
 def total_profit(df: pd.DataFrame) -> float:
     return df["Profit/Loss"].sum()
+
+
+def winning_months_pct(df: pd.DataFrame) -> float:
+    """
+    Fraction of calendar months with positive net P&L (0.0–1.0).
+    Months with zero P&L (no trades) are excluded from the count.
+    """
+    monthly = (
+        df.set_index("Close time")["Profit/Loss"]
+        .resample("ME")
+        .sum()
+    )
+    active = monthly[monthly != 0]
+    if len(active) == 0:
+        return 0.0
+    return float((active > 0).sum() / len(active))
 
 
 def num_trades(df: pd.DataFrame) -> int:
@@ -257,6 +273,7 @@ def compute_metrics(df: pd.DataFrame, *, initial_capital: float = 10_000) -> dic
         "average_loss":          round(average_loss(df), 2),
         "max_consecutive_wins":  max_consecutive_wins(df),
         "max_consecutive_losses": max_consecutive_losses(df),
+        "winning_months_pct":    round(winning_months_pct(df), 4),
     }
 
 

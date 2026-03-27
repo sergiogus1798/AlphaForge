@@ -2,7 +2,7 @@
 RunPortfolio.py — Portfolio generation entry point.
 
 Full pipeline:
-  1. Load strategies from TradingData/
+  1. Load strategies from strategies/approved/
   2. Run generation pipeline (Steps 1–4): filter → weight → scale → validate
   3. Run MAE stress test on valid portfolios (Step 5)
   4. Launch Portfolio Explorer dashboard
@@ -57,7 +57,7 @@ print("  AlphaForge — Portfolio Generation")
 print("=" * 65)
 
 # Load
-strategies = load_folder("TradingData")
+strategies = load_folder("strategies/approved")
 print(f"\n  {len(strategies)} strategies loaded.\n")
 
 # Pipeline (Steps 1–4)

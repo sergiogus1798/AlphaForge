@@ -14,7 +14,7 @@ from alphaforge.IndividualAnalysis.AlphaDetection.data_cleaner import load_price
 from alphaforge.IndividualAnalysis.AlphaDetection import AlphaDetector
 from alphaforge.IndividualAnalysis.RollingAlpha import plot_rolling_alpha
 
-DEFAULT_FOLDER   = "TradingData"
+DEFAULT_FOLDER   = "strategies/approved"
 DEFAULT_LOOKBACK = 252
 DEFAULT_STEP     = 22
 

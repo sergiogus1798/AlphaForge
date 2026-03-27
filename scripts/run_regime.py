@@ -22,7 +22,7 @@ from alphaforge.IndividualAnalysis.AlphaDetection.data_cleaner import load_price
 from alphaforge.IndividualAnalysis.AlphaDetection import AlphaDetector
 from alphaforge.IndividualAnalysis.RegimeAnalysis import RegimeAnalysis, plot_regime_report
 
-DEFAULT_FOLDER  = "TradingData"
+DEFAULT_FOLDER  = "strategies/approved"
 DEFAULT_CAPITAL = 10_000.0
 
 
@@ -71,7 +71,7 @@ if __name__ == "__main__":
 
     strategies = load_folder(DEFAULT_FOLDER)
     if not strategies:
-        print("No strategies found in TradingData/. Exiting.")
+        print("No strategies found in strategies/approved/. Exiting.")
         sys.exit(1)
 
     strategy_name, trades_df = _pick_strategy(strategies, key)

@@ -11,7 +11,7 @@ import pandas as pd
 from alphaforge.loader import load_folder
 from alphaforge.IndividualAnalysis.EquityCurve.plot_equity_panel import plot_equity_panel
 
-DEFAULT_FOLDER  = "TradingData"
+DEFAULT_FOLDER  = "strategies/approved"
 INITIAL_CAPITAL = 10_000.0
 PORTFOLIO_KEY   = "\u25c6 Portfolio (All)"
 

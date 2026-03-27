@@ -194,10 +194,10 @@ def load_folder(folder: str) -> dict[str, pd.DataFrame]:
 
     The strategy name is built from the relative path so that two files
     with the same name in different subfolders don't collide:
-        TradingData/EURUSD/strategy_a.csv  →  key: "EURUSD/strategy_a"
+        strategies/approved/EURUSD/strategy_a.csv  →  key: "EURUSD/strategy_a"
 
     Args:
-        folder: Root directory to scan (e.g. "TradingData/").
+        folder: Root directory to scan (e.g. "strategies/approved/").
 
     Returns:
         A dict mapping relative_path_name → clean DataFrame.
