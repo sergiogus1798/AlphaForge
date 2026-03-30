@@ -178,27 +178,46 @@ def _pairwise_co_loss(monthly: pd.DataFrame) -> pd.DataFrame:
 
 def _pairwise_overlap(
     strategies: dict[str, pd.DataFrame],
-    same_day: bool = True,
+    window_hours: float = 8.0,
 ) -> pd.DataFrame:
     """
     Compute boolean conflict matrix.
-    overlap(A, B) = True if any trade opens on the same asset on the same day.
+    overlap(A, B) = True if any trade from A and any trade from B open on the
+    same asset within `window_hours` of each other.
+
+    window_hours = 0.0 → filter disabled (all False).
     """
     names = list(strategies.keys())
     n = len(names)
     mat = np.zeros((n, n), dtype=bool)
 
-    # Pre-build key sets per strategy
-    key_sets = {}
+    if window_hours <= 0:
+        return pd.DataFrame(mat, index=names, columns=names)
+
+    window_ns = np.timedelta64(int(window_hours * 3_600 * 1_000_000_000), "ns")
+
+    # Pre-build per-symbol sorted open-time arrays per strategy
+    symbol_times: dict[str, dict[str, np.ndarray]] = {}
     for name, df in strategies.items():
-        if same_day:
-            key_sets[name] = set(zip(df["Symbol"], df["Open time"].dt.date))
-        else:
-            key_sets[name] = set(zip(df["Symbol"], df["Open time"]))
+        st: dict[str, np.ndarray] = {}
+        for symbol, grp in df.groupby("Symbol", sort=False):
+            st[symbol] = np.sort(grp["Open time"].values)
+        symbol_times[name] = st
 
     for i in range(n):
         for j in range(i + 1, n):
-            conflict = len(key_sets[names[i]] & key_sets[names[j]]) > 0
+            conflict = False
+            common = set(symbol_times[names[i]]) & set(symbol_times[names[j]])
+            for symbol in common:
+                ta_arr = symbol_times[names[i]][symbol]
+                tb_arr = symbol_times[names[j]][symbol]
+                for ta in ta_arr:
+                    lo = np.searchsorted(tb_arr, ta - window_ns)
+                    if lo < len(tb_arr) and tb_arr[lo] <= ta + window_ns:
+                        conflict = True
+                        break
+                if conflict:
+                    break
             mat[i, j] = conflict
             mat[j, i] = conflict
 
@@ -209,16 +228,17 @@ def _pairwise_overlap(
 
 def build_universe(
     strategies: dict[str, pd.DataFrame],
-    same_asset_same_day: bool = True,
+    same_asset_window_hours: float = 8.0,
     verbose: bool = True,
 ) -> Universe:
     """
     Pre-compute all universe matrices from the loaded strategy pool.
 
     Args:
-        strategies          : dict name → DataFrame (from load_folder)
-        same_asset_same_day : conflict granularity (True = day, False = bar)
-        verbose             : print progress to terminal
+        strategies               : dict name → DataFrame (from load_folder)
+        same_asset_window_hours  : min hours between trades on the same asset
+                                   (0 = disabled, i.e. no overlap filter)
+        verbose                  : print progress to terminal
 
     Returns:
         Universe dataclass with all pre-computed matrices.
@@ -262,7 +282,7 @@ def build_universe(
     _log(f"  [5/5]  Co-loss & overlap matrices  ({n}x{n}) ...")
     t = time.time()
     co_loss_mat  = _pairwise_co_loss(monthly_pnl)
-    overlap_mat  = _pairwise_overlap(strategies, same_day=same_asset_same_day)
+    overlap_mat  = _pairwise_overlap(strategies, window_hours=same_asset_window_hours)
     _log(f"         Done  [{time.time()-t:.1f}s]")
 
     _log(f"-" * 48)

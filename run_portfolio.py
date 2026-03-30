@@ -22,6 +22,7 @@ from alphaforge.portfolio.config import PortfolioConfig
 from alphaforge.portfolio.universe import build_universe
 from alphaforge.portfolio.generator.pipeline import run_pipeline
 from alphaforge.portfolio.generator.genetic import run_genetic
+from alphaforge.portfolio.generator.wf import compute_all_wf_equities
 from alphaforge.portfolio.stress.mae_stress import stress_test_all
 from alphaforge.portfolio.dashboard import run_portfolio_dashboard
 from alphaforge.portfolio.dashboard_corr import run_correlation_dashboard
@@ -46,8 +47,13 @@ def _parse_args() -> tuple[PortfolioConfig, bool]:
         elif a == "--max"          and i + 1 < len(args): kw["max_strategies"]           = int(args[i+1]); i += 2
         elif a == "--portfolios"   and i + 1 < len(args): kw["n_portfolios"]             = int(args[i+1]); i += 2
         elif a == "--seed"         and i + 1 < len(args): kw["random_seed"]              = int(args[i+1]); i += 2
+        elif a == "--window-hours" and i + 1 < len(args): kw["same_asset_window_hours"]  = float(args[i+1]); i += 2
         elif a == "--population"   and i + 1 < len(args): kw["ga_population_size"]       = int(args[i+1]); i += 2
         elif a == "--generations"  and i + 1 < len(args): kw["ga_generations"]           = int(args[i+1]); i += 2
+        elif a == "--no-rolling":                          kw["enable_rolling_filter"]    = False; i += 1
+        elif a == "--no-co-loss":                          kw["enable_co_loss_filter"]    = False; i += 1
+        elif a == "--no-tail":                             kw["enable_tail_corr_filter"]  = False; i += 1
+        elif a == "--no-same-asset":                       kw["enable_same_asset_filter"] = False; i += 1
         else: i += 1
 
     return PortfolioConfig(**kw), use_ga
@@ -90,8 +96,10 @@ if __name__ == "__main__":
         warnings.simplefilter("ignore")
 
         if use_ga:
-            universe   = build_universe(strategies, same_asset_same_day=config.same_asset_same_day)
+            universe   = build_universe(strategies, same_asset_window_hours=config.same_asset_window_hours)
             combinations = run_genetic(strategies, config, universe, verbose=True)
+            if combinations:
+                compute_all_wf_equities(combinations, strategies, config, verbose=True)
         else:
             result       = run_pipeline(strategies, config, verbose=True)
             combinations = result.combinations

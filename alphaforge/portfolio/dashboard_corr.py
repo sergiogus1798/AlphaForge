@@ -113,9 +113,29 @@ def _style(ax) -> None:
     ax.tick_params(colors=TEXT, labelsize=7)
 
 
+def _short_pair(a: str, b: str) -> str:
+    """'AUDJPY/Strategy 4.18.162' × 'GBPJPY/Strategy 1.10.137' → '4.18×1.10'"""
+    def nums(name: str) -> str:
+        parts = name.split("/")[-1].replace("Strategy ", "").split(".")
+        return ".".join(parts[:2])
+    return f"{nums(a)}×{nums(b)}"
+
+
+def _add_colorbar(fig, im, ax, **kw):
+    """Add a colorbar, safely removing any previous one attached to this ax."""
+    if hasattr(ax, "_cb"):
+        try:
+            ax._cb.remove()
+        except Exception:
+            pass
+    ax._cb = fig.colorbar(im, ax=ax, **kw)
+    return ax._cb
+
+
 # ── Panel 1: Correlation matrix ────────────────────────────────────────────────
 
 def _draw_corr_matrix(
+    fig,
     ax,
     pnl_df: pd.DataFrame,
     weights: dict | None,
@@ -152,23 +172,29 @@ def _draw_corr_matrix(
             ax.text(j, i, txt, ha="center", va="center",
                     fontsize=5.5, color=tc)
 
-    plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    _add_colorbar(fig, im, ax, fraction=0.046, pad=0.04)
 
 
 # ── Panel 2: Rolling pairwise correlations ─────────────────────────────────────
 
 def _draw_rolling_corrs(
+    fig,
     ax,
     combination: tuple[str, ...],
     strategies: dict,
     window_months: int,
+    threshold: float = 0.35,
 ) -> None:
+    """
+    Line chart: one line per pair.
+    Pairs that never breach the threshold → thin gray.
+    Pairs that breach at least once → colored + thicker, labelled.
+    """
     ax.cla()
     _style(ax)
 
     pairs = list(itertools.combinations(combination, 2))
 
-    # Compute rolling series for all pairs
     rolling: dict[tuple, pd.Series] = {}
     for a, b in pairs:
         roll = _rolling_correlations(
@@ -183,65 +209,55 @@ def _draw_rolling_corrs(
         ax.set_title("Rolling Correlations — insufficient data", color=DIM, fontsize=9)
         return
 
+    # Separate breaching vs clean pairs
+    breaching = {k: v for k, v in rolling.items() if v.abs().max() > threshold}
+    clean     = {k: v for k, v in rolling.items() if v.abs().max() <= threshold}
+
+    # Draw clean pairs first (background, thin, gray, no label)
+    for (a, b), series in clean.items():
+        x = [p.to_timestamp() for p in series.index]
+        ax.plot(x, series.values, color="#444466", lw=0.7, alpha=0.45)
+
+    # Draw breaching pairs on top with distinct colors and labels
+    try:
+        cmap = plt.colormaps.get_cmap("tab10")
+    except AttributeError:
+        cmap = plt.cm.get_cmap("tab10")
+
+    for k, ((a, b), series) in enumerate(breaching.items()):
+        x   = [p.to_timestamp() for p in series.index]
+        lbl = _short_pair(a, b)
+        ax.plot(x, series.values, color=cmap(k % 10), lw=1.6, alpha=0.9, label=lbl)
+
+    # Threshold lines
+    ax.axhline( threshold, color=RED, lw=1.0, ls="--", alpha=0.7,
+                label=f"+{threshold} threshold")
+    ax.axhline(-threshold, color=RED, lw=1.0, ls="--", alpha=0.7)
+    ax.axhline(0, color=BORDER, lw=0.8)
+    ax.set_ylim(-1, 1)
+    ax.set_ylabel("Pearson r", color=TEXT, fontsize=8)
+    ax.tick_params(colors=TEXT, labelsize=7)
+    ax.grid(True, color=BORDER, lw=0.4)
+
+    n_breach = len(breaching)
     ax.set_title(
-        f"Rolling {window_months}m Pearson  ·  {len(pairs)} pair(s)",
+        f"Rolling {window_months}m Pearson  ·  {len(pairs)} pairs  "
+        f"({n_breach} breach >{threshold})",
         color=TEXT, fontsize=9,
     )
 
-    if len(pairs) <= 10:
-        # ── Line chart ────────────────────────────────────────────────────────
-        try:
-            cmap = plt.colormaps.get_cmap("tab20")
-        except AttributeError:
-            cmap = plt.cm.get_cmap("tab20")  # matplotlib < 3.7
-
-        for k, ((a, b), series) in enumerate(rolling.items()):
-            x   = [p.to_timestamp() for p in series.index]
-            lbl = f"{_short(a)} × {_short(b)}"
-            ax.plot(x, series.values,
-                    color=cmap(k / max(len(pairs), 1)),
-                    lw=1.4, label=lbl)
-
-        ax.axhline( 0,   color=BORDER, lw=0.8)
-        ax.axhline( 0.3, color=RED,    lw=0.8, ls="--", alpha=0.55)
-        ax.axhline(-0.3, color=RED,    lw=0.8, ls="--", alpha=0.55)
-        ax.set_ylim(-1, 1)
-        ax.set_ylabel("Pearson r", color=TEXT, fontsize=8)
-        ax.legend(fontsize=6.5, facecolor=AX_BG, labelcolor=TEXT,
-                  loc="upper left", framealpha=0.85, ncol=2)
-        ax.grid(True, color=BORDER, lw=0.4)
-
-    else:
-        # ── Heatmap (time × pairs) ────────────────────────────────────────────
-        all_periods = sorted({p for s in rolling.values() for p in s.index})
-
-        mat_data = {
-            f"{_short(a)} × {_short(b)}": rolling[(a, b)]
-            for (a, b) in pairs if (a, b) in rolling
-        }
-        mat_df = (
-            pd.DataFrame(mat_data, index=all_periods)
-            .fillna(0.0)
-            .T
+    if breaching:
+        ax.legend(
+            fontsize=6.5, facecolor=AX_BG, labelcolor=TEXT,
+            loc="upper left", framealpha=0.85,
+            ncol=max(1, n_breach // 6),
         )
-
-        im = ax.imshow(mat_df.values, cmap="RdYlGn_r",
-                       vmin=-1, vmax=1, aspect="auto", interpolation="nearest")
-        ax.set_yticks(range(len(mat_df.index)))
-        ax.set_yticklabels(mat_df.index, color=TEXT, fontsize=5.5)
-
-        step = max(1, len(all_periods) // 8)
-        ax.set_xticks(range(0, len(all_periods), step))
-        ax.set_xticklabels(
-            [str(all_periods[i])[:7] for i in range(0, len(all_periods), step)],
-            rotation=30, ha="right", color=TEXT, fontsize=6,
-        )
-        plt.colorbar(im, ax=ax, fraction=0.025, pad=0.02)
 
 
 # ── Panels 3 & 4: PCA ─────────────────────────────────────────────────────────
 
 def _draw_pca(
+    fig,
     ax_scree,
     ax_load,
     pnl_df: pd.DataFrame,
@@ -306,7 +322,7 @@ def _draw_pca(
             ax_load.text(j, i, f"{v:.2f}", ha="center", va="center",
                          fontsize=5.5, color=tc)
 
-    plt.colorbar(im, ax=ax_load, fraction=0.046, pad=0.04)
+    _add_colorbar(fig, im, ax_load, fraction=0.046, pad=0.04)
 
 
 # ── Full render ────────────────────────────────────────────────────────────────
@@ -321,6 +337,7 @@ def _render_corr(
     strategies: dict,
     method: str,
     window_months: int,
+    roll_threshold: float,
 ) -> None:
     pnl_df = _daily_pnl_combo(cr.combination, strategies)
 
@@ -328,9 +345,9 @@ def _render_corr(
     weights = vp.weights if vp else None
     mlabel  = METHOD_LABELS[method]
 
-    _draw_corr_matrix(ax_corr, pnl_df, weights, mlabel)
-    _draw_rolling_corrs(ax_roll, cr.combination, strategies, window_months)
-    _draw_pca(ax_scree, ax_load, pnl_df)
+    _draw_corr_matrix(fig, ax_corr, pnl_df, weights, mlabel)
+    _draw_rolling_corrs(fig, ax_roll, cr.combination, strategies, window_months, roll_threshold)
+    _draw_pca(fig, ax_scree, ax_load, pnl_df)
 
     fig.suptitle(
         f"Deep Correlation  ·  Combination #{idx + 1}/{n}  ·  "
@@ -377,9 +394,9 @@ def run_correlation_dashboard(
         figure=fig,
         width_ratios=[1, 1.6],
         height_ratios=[1, 1],
-        hspace=0.38,
+        hspace=0.42,
         wspace=0.32,
-        left=0.04, right=0.81,
+        left=0.08, right=0.81,
         top=0.93, bottom=0.12,
     )
 
@@ -422,13 +439,15 @@ def run_correlation_dashboard(
         lbl.set_fontsize(9)
 
     # ── Callbacks ──────────────────────────────────────────────────────────────
+    roll_threshold = getattr(config, "max_rolling_corr", 0.35)
+
     def _refresh() -> None:
         _render_corr(
             fig,
             ax_corr, ax_roll, ax_scree, ax_load,
             nav_label,
             combinations[state["idx"]], state["idx"], n,
-            strategies, state["method"], window_months,
+            strategies, state["method"], window_months, roll_threshold,
         )
 
     def on_prev(event):

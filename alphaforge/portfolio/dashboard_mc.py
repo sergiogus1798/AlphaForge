@@ -111,10 +111,24 @@ def _simulate_curves(
         n_blk  = len(blocks)
         repl   = mc_method == "block_wr"
         curves = np.empty((n_sims, T), dtype=np.float64)
-        for i in range(n_sims):
-            idx = rng.integers(0, n_blk, size=n_blk) if repl else rng.permutation(n_blk)
-            seq = np.concatenate([blocks[j] for j in idx])[:T]
-            curves[i] = np.cumsum(seq)
+        if repl:
+            # Block bootstrap (with replacement): draw from full-size blocks only
+            # so the concatenation is always >= T before truncation.
+            full_blocks = [b for b in blocks if len(b) == BLOCK_SIZE]
+            pool = full_blocks if full_blocks else blocks
+            n_pool  = len(pool)
+            n_draw  = math.ceil(T / BLOCK_SIZE)
+            for i in range(n_sims):
+                idx = rng.integers(0, n_pool, size=n_draw)
+                seq = np.concatenate([pool[j] for j in idx])[:T]
+                curves[i] = np.cumsum(seq)
+        else:
+            # Block reshuffle (without replacement): permute all blocks;
+            # concatenation always equals T exactly.
+            for i in range(n_sims):
+                idx = rng.permutation(n_blk)
+                seq = np.concatenate([blocks[j] for j in idx])[:T]
+                curves[i] = np.cumsum(seq)
         return curves, np.cumsum(pnl), "Trade #"
 
     raise ValueError(f"Unknown mc_method: {mc_method!r}")

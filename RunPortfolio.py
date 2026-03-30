@@ -36,7 +36,7 @@ config = PortfolioConfig(
     max_pearson_corr         = 0.30,
     max_spearman_corr        = 0.40,
     max_co_loss_freq         = 0.10,
-    same_asset_same_day      = True,
+    same_asset_window_hours  = 8.0,
 
     # Rolling correlation filters
     rolling_window_months    = 12,

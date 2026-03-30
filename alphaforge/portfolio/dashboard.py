@@ -27,6 +27,7 @@ from alphaforge.portfolio.config import PortfolioConfig
 from alphaforge.portfolio.generator.combo_result import (
     CombinationResult, METHODS, METHOD_COLORS, METHOD_LABELS,
 )
+from alphaforge.portfolio.generator.wf import WF_METHODS
 
 
 # ── Theme ──────────────────────────────────────────────────────────────────────
@@ -74,7 +75,8 @@ def _asset(name: str, strategies: dict) -> str:
     df = strategies.get(name)
     if df is not None and "Symbol" in df.columns:
         try:
-            return str(df["Symbol"].mode()[0])
+            symbol = str(df["Symbol"].mode()[0])
+            return symbol.split("_")[0]
         except Exception:
             pass
     parts = name.split("/")
@@ -320,7 +322,8 @@ def _draw_info(
 
 # ── Equity curves ──────────────────────────────────────────────────────────────
 
-def _draw_equity(ax, cr: CombinationResult) -> None:
+def _draw_equity(ax, cr: CombinationResult, wf_visible: bool = True) -> list:
+    """Draw equity curves. Returns list of WF line objects for toggle control."""
     ax.cla()
     _style(ax)
 
@@ -339,9 +342,35 @@ def _draw_equity(ax, cr: CombinationResult) -> None:
                     color=METHOD_COLORS[m], lw=2,
                     label=label)
 
+    # Walk-forward equity curves (dotted, same color, no legend entry)
+    # Offset each WF curve so it starts at the same level as the static equity
+    # of the same method at the WF start date — making them directly comparable.
+    wf_lines = []
+    wf_equity = getattr(cr, "wf_equity", {})
+    for m, eq_wf in wf_equity.items():
+        if eq_wf is None:
+            continue
+        vp = cr.portfolios.get(m)
+        if vp is not None:
+            eq_static = _equity(vp.portfolio_df)
+            wf_start  = eq_wf.index[0]
+            # Find static value at or just before WF start
+            static_at_start = eq_static.asof(wf_start) if hasattr(eq_static.index, 'asof') else (
+                eq_static[eq_static.index <= wf_start].iloc[-1]
+                if (eq_static.index <= wf_start).any() else 0.0
+            )
+            offset = float(static_at_start) if not (static_at_start != static_at_start) else 0.0
+        else:
+            offset = 0.0
+        line, = ax.plot(
+            eq_wf.index, eq_wf.values + offset,
+            color=METHOD_COLORS[m], lw=1.2, ls=":", alpha=0.7,
+            visible=wf_visible,
+        )
+        wf_lines.append(line)
+
     ax.axhline(0, color=BORDER, lw=0.8)
 
-    # Y-axis label close to axis, ticks facing inward
     ax.set_ylabel("Cumul. P&L ($)", color=TEXT, fontsize=8.5, labelpad=4)
     ax.yaxis.set_label_coords(-0.03, 0.5)
     ax.tick_params(axis="y", direction="in", pad=3, colors=TEXT)
@@ -353,6 +382,8 @@ def _draw_equity(ax, cr: CombinationResult) -> None:
     ax.set_ylim(bottom=0)
     ax.margins(x=0.01)
     plt.setp(ax.get_xticklabels(), visible=False)
+
+    return wf_lines
 
 
 # ── Metrics comparison table ───────────────────────────────────────────────────
@@ -461,27 +492,152 @@ def _draw_metrics(ax, cr: CombinationResult) -> None:
             cell.get_text().set_color(text_colors[r - 1][c])
 
 
+# ── WF metrics table ───────────────────────────────────────────────────────────
+
+# Keys that cannot be derived from an equity curve — shown as "—" in WF table
+_WF_NOT_AVAILABLE = {"profit_factor", "num_trades", "__mae__"}
+
+_WF_METHOD_COL_LABELS = {
+    "equal":        "Equal (static)",
+    "min_variance": "Min Var WF",
+    "risk_parity":  "Risk Par WF",
+    "hrp":          "HRP WF",
+}
+
+
+def _draw_wf_metrics(ax, cr: CombinationResult, config: PortfolioConfig) -> None:
+    ax.cla()
+    ax.set_facecolor(BG)
+    ax.axis("off")
+
+    # cr.wf_metrics pre-computed by compute_all_wf_equities using same compute_metrics()
+    stored_wf = getattr(cr, "wf_metrics", {})
+
+    # Build per-method metric dicts — equal uses static vp (WF = static for equal weight)
+    wf_metrics: dict[str, dict] = {}
+    for m in METHODS:
+        if m == "equal":
+            vp = cr.portfolios.get("equal")
+            if vp:
+                d = dict(vp.metrics)
+                d["dd_failed"] = vp.dd_failed
+                wf_metrics["equal"] = d
+            else:
+                wf_metrics["equal"] = {}
+        else:
+            md = stored_wf.get(m, {})
+            if md:
+                # dd_failed derived same way as validator
+                dd_usd = md.get("drawdown", 0.0)
+                md = dict(md)
+                md["dd_failed"] = dd_usd > config.total_drawdown_limit_usd
+            wf_metrics[m] = md
+
+    col_labels  = ["Metric (WF)"] + [_WF_METHOD_COL_LABELS[m] for m in METHODS]
+    rows_data   = []
+    cell_colors = []
+    text_colors = []
+
+    # Use exact same rows as the static table
+    for label, key, fmt, higher_better in _METRIC_ROWS:
+        row   = [label]
+        c_row = [AX_BG]
+        t_row = [DIM]
+
+        if key in _WF_NOT_AVAILABLE:
+            # Row exists but values unavailable for WF methods
+            for m in METHODS:
+                if key == "__mae__":
+                    row.append("—"); c_row.append(AX_BG); t_row.append(DIM)
+                else:
+                    row.append("—"); c_row.append(AX_BG); t_row.append(DIM)
+        elif key == "__dd__":
+            for m in METHODS:
+                md = wf_metrics.get(m, {})
+                if not md:
+                    row.append("—");    c_row.append(AX_BG);    t_row.append(DIM)
+                elif md.get("dd_failed", False):
+                    row.append("FAIL"); c_row.append("#2a0808"); t_row.append(RED)
+                else:
+                    row.append("PASS"); c_row.append("#082a12"); t_row.append(GREEN)
+        else:
+            vals = []
+            for m in METHODS:
+                md = wf_metrics.get(m, {})
+                if not md or key not in md:
+                    row.append("—"); c_row.append(AX_BG); t_row.append(DIM)
+                    vals.append(None)
+                else:
+                    v = md[key]
+                    row.append(fmt.format(v))
+                    c_row.append(AX_BG)
+                    t_row.append(TEXT)
+                    vals.append(v)
+
+            valid_vals = [(i, v) for i, v in enumerate(vals) if v is not None]
+            if valid_vals and higher_better is not None:
+                best_i = (max if higher_better else min)(valid_vals, key=lambda x: x[1])[0]
+                c_row[best_i + 1] = "#0e2535"
+                t_row[best_i + 1] = CYAN
+
+        rows_data.append(row)
+        cell_colors.append(c_row)
+        text_colors.append(t_row)
+
+    tbl = ax.table(
+        cellText=rows_data,
+        colLabels=col_labels,
+        loc="center",
+        cellLoc="center",
+    )
+    tbl.auto_set_font_size(False)
+    tbl.set_fontsize(8.5)
+    tbl.auto_set_column_width(range(len(col_labels)))
+    tbl.scale(1, 1.35)
+
+    for (r, c), cell in tbl.get_celld().items():
+        cell.set_edgecolor(BORDER)
+        if r == 0:
+            if c > 0:
+                m  = METHODS[c - 1]
+                vp = cr.portfolios.get(m)
+                tc = METHOD_COLORS[m] if (vp and not vp.dd_failed) else DIM
+            else:
+                tc = AMBER
+            cell.set_facecolor(COL_HDR)
+            cell.get_text().set_color(tc)
+            cell.get_text().set_fontweight("bold")
+        else:
+            bg       = ROW_A if r % 2 == 0 else ROW_B
+            override = cell_colors[r - 1][c]
+            cell.set_facecolor(override if override != AX_BG else bg)
+            cell.get_text().set_color(text_colors[r - 1][c])
+
+
 # ── Full render ────────────────────────────────────────────────────────────────
 
 def _render(
-    fig, ax_info, ax_eq, ax_metrics, nav_label,
+    fig, ax_info, ax_eq, ax_metrics, ax_wf_metrics, nav_label,
     cr: CombinationResult, idx: int, n: int,
-    strategies: dict, scroll_info: dict,
+    strategies: dict, scroll_info: dict, config: PortfolioConfig,
 ) -> None:
     n_rows, thumb = _draw_info(ax_info, cr, idx + 1, n, strategies)
     scroll_info["n_rows"]  = n_rows
     scroll_info["offset"]  = 0
     scroll_info["thumb"]   = thumb
 
-    _draw_equity(ax_eq, cr)
+    wf_visible = scroll_info.get("wf_visible", True)
+    wf_lines   = _draw_equity(ax_eq, cr, wf_visible=wf_visible)
+    scroll_info["wf_lines"] = wf_lines
     _draw_metrics(ax_metrics, cr)
+    _draw_wf_metrics(ax_wf_metrics, cr, config)
 
     n_pass = cr.n_valid_methods
     n_fail = len(METHODS) - n_pass
     status = f"{n_pass}/4 DD pass" + (f"  {n_fail} fail (shown dashed)" if n_fail else "")
 
     fig.suptitle(
-        f"Combination #{idx+1}/{n}  |  {cr.combo_label}  |  "
+        f"Combination #{idx+1}/{n}  |  "
         f"Raw R/DD {cr.raw_return_dd:.2f}  |  {status}",
         color=CYAN, fontsize=11, y=0.99,
     )
@@ -577,6 +733,119 @@ def _show_overview(combinations: list[CombinationResult]) -> None:
     plt.tight_layout(rect=[0, 0, 1, 0.95])
 
 
+# ── WF Weight History table ────────────────────────────────────────────────────
+
+_WF_METHOD_FULL = {
+    "min_variance": "Min Variance",
+    "risk_parity":  "Risk Parity",
+    "hrp":          "HRP",
+}
+
+
+def _show_wf_weights(cr: CombinationResult) -> None:
+    """
+    Open a new figure showing the walk-forward weight history for one combination.
+
+    Rows    = strategies (short names)
+    Columns = OOS windows (e.g. "2019–2022")
+    RadioButtons switch between methods.
+    """
+    wf_weights = getattr(cr, "wf_weights", {})
+
+    # Collect all windows across methods to find a consistent column set
+    all_windows: list[str] = []
+    for m in WF_METHODS:
+        for win in wf_weights.get(m, []):
+            if win["label"] not in all_windows:
+                all_windows.append(win["label"])
+
+    if not all_windows:
+        print("  No walk-forward weight history available for this combination.")
+        return
+
+    short_names = [n.split("/")[-1] for n in cr.combination]
+
+    fig_w = max(10.0, len(all_windows) * 1.8 + 3.0)
+    fig_h = max(4.0,  len(short_names) * 0.5 + 3.5)
+    fig_wf = plt.figure(figsize=(fig_w, fig_h), facecolor=BG)
+    fig_wf.suptitle(
+        f"Walk-Forward Weight History  |  Combination #{cr.rank}",
+        color=CYAN, fontsize=11, y=0.98,
+    )
+
+    # Reserve left margin for RadioButtons
+    ax_tbl = fig_wf.add_axes([0.18, 0.10, 0.80, 0.82])
+    ax_tbl.set_facecolor(BG)
+    ax_tbl.axis("off")
+
+    # RadioButtons for method selection
+    ax_radio = fig_wf.add_axes([0.01, 0.30, 0.14, 0.40], facecolor=AX_BG)
+    from matplotlib.widgets import RadioButtons
+    radio = RadioButtons(
+        ax_radio,
+        labels=[_WF_METHOD_FULL[m] for m in WF_METHODS],
+        activecolor=CYAN,
+    )
+    for lbl, m in zip(radio.labels, WF_METHODS):
+        lbl.set_color(METHOD_COLORS[m])
+        lbl.set_fontsize(8.5)
+
+    tbl_ref = [None]   # mutable container so the callback can replace the table
+
+    def _draw_table(method: str) -> None:
+        if tbl_ref[0] is not None:
+            tbl_ref[0].remove()
+            tbl_ref[0] = None
+
+        history = wf_weights.get(method, [])
+        win_map  = {w["label"]: w["weights"] for w in history}
+
+        col_labels = ["Strategy"] + all_windows
+        rows_data  : list[list[str]] = []
+        for name, short in zip(cr.combination, short_names):
+            row = [short]
+            for win_label in all_windows:
+                w = win_map.get(win_label, {}).get(name, None)
+                row.append(f"{w:.3f}" if w is not None else "—")
+            rows_data.append(row)
+
+        tbl = ax_tbl.table(
+            cellText=rows_data,
+            colLabels=col_labels,
+            loc="center",
+            cellLoc="center",
+        )
+        tbl.auto_set_font_size(False)
+        tbl.set_fontsize(9)
+        tbl.auto_set_column_width(range(len(col_labels)))
+        tbl.scale(1, 1.6)
+
+        mc = METHOD_COLORS[method]
+        for (r, c), cell in tbl.get_celld().items():
+            cell.set_edgecolor(BORDER)
+            if r == 0:
+                cell.set_facecolor(COL_HDR)
+                cell.get_text().set_color(mc if c > 0 else CYAN)
+                cell.get_text().set_fontweight("bold")
+            else:
+                bg = ROW_A if r % 2 == 0 else ROW_B
+                cell.set_facecolor(bg)
+                cell.get_text().set_color(TEXT if c > 0 else DIM)
+
+        tbl_ref[0] = tbl
+        fig_wf.canvas.draw_idle()
+
+    def on_method(label: str) -> None:
+        m = next(m for m in WF_METHODS if _WF_METHOD_FULL[m] == label)
+        _draw_table(m)
+
+    radio.on_clicked(on_method)
+    fig_wf._refs = [radio, tbl_ref]
+
+    _draw_table(WF_METHODS[0])
+    fig_wf.show()
+
+
 # ── Entry point ────────────────────────────────────────────────────────────────
 
 def run_portfolio_dashboard(
@@ -598,25 +867,26 @@ def run_portfolio_dashboard(
     strategies = strategies or {}
     n          = len(combinations)
     state      = {"idx": 0}
-    scroll_info: dict = {"offset": 0, "n_rows": 0, "thumb": None}
+    scroll_info: dict = {"offset": 0, "n_rows": 0, "thumb": None, "wf_visible": True, "wf_lines": []}
 
     # ── Figure & layout ────────────────────────────────────────────────────────
-    fig = plt.figure(figsize=(24, 12), facecolor=BG)
+    fig = plt.figure(figsize=(28, 12), facecolor=BG)
 
     gs = gridspec.GridSpec(
-        2, 2,
+        2, 3,
         figure=fig,
-        width_ratios=[1.0, 3.0],    # wider right column for equity + metrics
+        width_ratios=[1.0, 1.5, 1.5],  # info | static metrics | WF metrics
         height_ratios=[2.6, 2.4],
         hspace=0.06,
-        wspace=0.04,
+        wspace=0.06,
         left=0.01, right=0.99,
         top=0.93, bottom=0.10,
     )
 
-    ax_info    = fig.add_subplot(gs[0:2, 0])
-    ax_eq      = fig.add_subplot(gs[0, 1])
-    ax_metrics = fig.add_subplot(gs[1, 1])
+    ax_info       = fig.add_subplot(gs[0:2, 0])
+    ax_eq         = fig.add_subplot(gs[0, 1:3])   # equity spans both metric cols
+    ax_metrics    = fig.add_subplot(gs[1, 1])
+    ax_wf_metrics = fig.add_subplot(gs[1, 2])
 
     ax_nav = fig.add_axes([0.42, 0.02, 0.16, 0.045])
     ax_nav.set_facecolor(BG)
@@ -624,28 +894,57 @@ def run_portfolio_dashboard(
     nav_label = ax_nav.text(0.5, 0.5, "", transform=ax_nav.transAxes,
                             color=TEXT, ha="center", va="center", fontsize=10)
 
-    ax_prev = fig.add_axes([0.34, 0.02, 0.07, 0.045])
-    ax_next = fig.add_axes([0.59, 0.02, 0.07, 0.045])
-    btn_prev = Button(ax_prev, "< Prev", color=AX_BG, hovercolor=BORDER)
-    btn_next = Button(ax_next, "Next >", color=AX_BG, hovercolor=BORDER)
+    ax_prev    = fig.add_axes([0.34, 0.02, 0.07, 0.045])
+    ax_next    = fig.add_axes([0.59, 0.02, 0.07, 0.045])
+    ax_wf      = fig.add_axes([0.70, 0.02, 0.10, 0.045])
+    ax_wf_tbl  = fig.add_axes([0.81, 0.02, 0.10, 0.045])
+    btn_prev   = Button(ax_prev,   "< Prev",     color=AX_BG,    hovercolor=BORDER)
+    btn_next   = Button(ax_next,   "Next >",     color=AX_BG,    hovercolor=BORDER)
+    btn_wf     = Button(ax_wf,     "WF: ON",     color="#0a2010", hovercolor="#0d2a18")
+    btn_wf_tbl = Button(ax_wf_tbl, "WF Weights", color=AX_BG,    hovercolor=BORDER)
     btn_prev.label.set_color(TEXT)
     btn_next.label.set_color(TEXT)
+    btn_wf.label.set_color(GREEN)
+    btn_wf_tbl.label.set_color(AMBER)
 
     # ── Navigation callbacks ───────────────────────────────────────────────────
     def on_prev(event):
         state["idx"] = max(state["idx"] - 1, 0)
-        _render(fig, ax_info, ax_eq, ax_metrics, nav_label,
+        _render(fig, ax_info, ax_eq, ax_metrics, ax_wf_metrics, nav_label,
                 combinations[state["idx"]], state["idx"], n,
-                strategies, scroll_info)
+                strategies, scroll_info, config)
 
     def on_next(event):
         state["idx"] = min(state["idx"] + 1, n - 1)
-        _render(fig, ax_info, ax_eq, ax_metrics, nav_label,
+        _render(fig, ax_info, ax_eq, ax_metrics, ax_wf_metrics, nav_label,
                 combinations[state["idx"]], state["idx"], n,
-                strategies, scroll_info)
+                strategies, scroll_info, config)
 
     btn_prev.on_clicked(on_prev)
     btn_next.on_clicked(on_next)
+
+    def on_wf_toggle(event):
+        current = scroll_info.get("wf_visible", True)
+        new_vis = not current
+        scroll_info["wf_visible"] = new_vis
+        for line in scroll_info.get("wf_lines", []):
+            line.set_visible(new_vis)
+        if new_vis:
+            btn_wf.label.set_text("WF: ON")
+            btn_wf.label.set_color(GREEN)
+            ax_wf.set_facecolor("#0a2010")
+        else:
+            btn_wf.label.set_text("WF: OFF")
+            btn_wf.label.set_color(DIM)
+            ax_wf.set_facecolor(AX_BG)
+        fig.canvas.draw_idle()
+
+    btn_wf.on_clicked(on_wf_toggle)
+
+    def on_wf_weights(event):
+        _show_wf_weights(combinations[state["idx"]])
+
+    btn_wf_tbl.on_clicked(on_wf_weights)
 
     # ── Scroll callback ────────────────────────────────────────────────────────
     def on_scroll(event):
@@ -675,12 +974,12 @@ def run_portfolio_dashboard(
     fig.canvas.mpl_connect("scroll_event", on_scroll)
 
     # Keep widget references alive — prevents GC when _show=False returns early
-    fig._refs = [btn_prev, btn_next, state, scroll_info]
+    fig._refs = [btn_prev, btn_next, btn_wf, btn_wf_tbl, state, scroll_info]
 
     # ── Initial render ─────────────────────────────────────────────────────────
     _show_overview(combinations)
-    _render(fig, ax_info, ax_eq, ax_metrics, nav_label,
-            combinations[0], 0, n, strategies, scroll_info)
+    _render(fig, ax_info, ax_eq, ax_metrics, ax_wf_metrics, nav_label,
+            combinations[0], 0, n, strategies, scroll_info, config)
 
     if _show:
         plt.show()

@@ -17,7 +17,6 @@ Callback architecture (zero duplicate-output conflicts):
 
 import math
 import threading
-import webbrowser
 
 import numpy as np
 import pandas as pd
@@ -882,7 +881,5 @@ def run_mc_dashboard(
 
     # ── Launch ────────────────────────────────────────────────────────────────
     url = f"http://127.0.0.1:{port}"
-    if not debug:
-        threading.Timer(1.5, lambda: webbrowser.open(url)).start()
     print(f"\nMonte Carlo Dashboard\n  {url}\n  Ctrl+C to stop.\n")
     app.run(port=port, debug=debug)

@@ -7,6 +7,8 @@ Usage:
 """
 
 import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import pandas as pd
 from alphaforge.loader import load_folder
 from alphaforge.IndividualAnalysis.EquityCurve.plot_equity_panel import plot_equity_panel
@@ -17,8 +19,25 @@ PORTFOLIO_KEY   = "\u25c6 Portfolio (All)"
 
 
 if __name__ == "__main__":
-    args   = [a for a in sys.argv[1:] if not a.startswith("--")]
-    folder = DEFAULT_FOLDER
+    raw    = sys.argv[1:]
+    folder = next((a.split("=", 1)[1] if "=" in a else raw[raw.index(a) + 1]
+                   for a in raw if a == "--folder" or a.startswith("--folder=")),
+                  DEFAULT_FOLDER)
+    # strip --folder <value> or --folder=<value> from positional args
+    _skip = False
+    _positional = []
+    for a in raw:
+        if _skip:
+            _skip = False
+            continue
+        if a == "--folder":
+            _skip = True
+            continue
+        if a.startswith("--folder="):
+            continue
+        if not a.startswith("--"):
+            _positional.append(a)
+    args = _positional
 
     strategies = load_folder(folder)
     if not strategies:

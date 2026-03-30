@@ -109,6 +109,81 @@ class _RollingCache:
         )
 
 
+# ── Compatibility graph ───────────────────────────────────────────────────────
+
+def _build_adjacency(
+    names        : list[str],
+    strategies   : dict,
+    config       : PortfolioConfig,
+    monthly_cache: dict[str, pd.Series],
+    rolling_cache: _RollingCache,
+    universe,
+) -> dict[str, set[str]]:
+    """
+    Build a compatibility adjacency set: adj[A] = {B, C, ...} iff A passes
+    ALL enabled pairwise filters with B, C, etc.
+
+    Done in O(N²) using the pre-built Universe matrices and RollingCache — both
+    are already computed before seeding, so this is pure index lookups.
+    """
+    adj: dict[str, set[str]] = {n: set() for n in names}
+    dummy = FilterStats()
+
+    for i, a in enumerate(names):
+        for b in names[i + 1:]:
+            if not _apply_static_filters(
+                (a, b), strategies, config, monthly_cache, dummy, universe=universe
+            ):
+                continue
+            if config.enable_rolling_filter and not rolling_cache.passes(a, b):
+                continue
+            adj[a].add(b)
+            adj[b].add(a)
+
+    return adj
+
+
+def _sample_clique(
+    adj          : dict[str, set[str]],
+    names        : list[str],
+    size         : int,
+    rng          : random.Random,
+    start_weights: list[float] | None = None,
+    max_restarts : int = 20,
+) -> tuple[str, ...] | None:
+    """
+    Grow a clique of `size` in the compatibility graph by greedy intersection.
+
+    Start from a (weighted) random strategy.  At each step, intersect the
+    candidate set with the new node's adjacency — every node added is
+    guaranteed compatible with ALL already-chosen nodes.
+
+    start_weights biases the starting node toward underrepresented strategies
+    for population diversity.
+
+    Returns None if no clique of the required size is found after max_restarts.
+    """
+    for _ in range(max_restarts):
+        if start_weights:
+            start = rng.choices(names, weights=start_weights, k=1)[0]
+        else:
+            start = rng.choice(names)
+
+        combo      = [start]
+        candidates = set(adj[start])          # all compatible with start
+
+        while len(combo) < size and candidates:
+            nxt = rng.choice(list(candidates))
+            combo.append(nxt)
+            candidates &= adj[nxt]            # keep only those compatible with nxt too
+            candidates.discard(nxt)
+
+        if len(combo) == size:
+            return tuple(sorted(combo))
+
+    return None   # could not grow a clique of the required size
+
+
 # ── Individual ────────────────────────────────────────────────────────────────
 
 @dataclass
@@ -129,8 +204,17 @@ def _is_valid(
     universe,
 ) -> ValidPortfolio | None:
     """
-    Run all filters on a candidate combo. Returns a ValidPortfolio on success,
-    None on any filter failure or DD breach.
+    Run structural filters on a candidate combo.  Returns a ValidPortfolio on
+    success, None if any hard constraint is violated.
+
+    Hard constraints (cause rejection):
+      1. Static correlation filters  — Pearson, Spearman, co-loss, same-asset
+      2. Rolling correlation filter  — all windows must be within threshold
+
+    Soft constraint (NOT a hard gate here):
+      Drawdown is handled by the fitness function via return_dd_ratio, which
+      naturally selects away from bad-DD combos without blocking exploration.
+      The final ValidPortfolio carries dd_failed=True/False for display.
     """
     stats = FilterStats()
 
@@ -141,25 +225,13 @@ def _is_valid(
         return None
 
     # 2. Rolling filter (O(1) with cache)
-    if not rolling_cache.combo_passes(combo):
+    if config.enable_rolling_filter and not rolling_cache.combo_passes(combo):
         return None
 
-    # 3. Raw DD check (equal-weight, unscaled)
+    # 3. Scale and validate (dd_failed flag set inside validate())
     weights   = equal_weight(list(combo))
     portfolio = build_weighted_portfolio(combo, strategies, weights)
-    daily     = portfolio.groupby(portfolio["Close time"].dt.date)["Profit/Loss"].sum()
-    worst_day = float(daily.min())
-    dr        = pd.date_range(daily.index.min(), daily.index.max(), freq="D")
-    equity    = daily.reindex(dr, fill_value=0.0).cumsum()
-    total_eq  = config.account_balance + equity
-    raw_dd    = float((total_eq.cummax() - total_eq).max())
-
-    if (worst_day < -config.daily_loss_limit_usd or
-            raw_dd > config.total_drawdown_limit_usd):
-        return None
-
-    # 4. Scale and validate
-    scaled = rescale(combo, "equal", weights, portfolio, config)
+    scaled    = rescale(combo, "equal", weights, portfolio, config)
     return validate(scaled, config)
 
 
@@ -251,16 +323,54 @@ def _seed_population(
     verbose      : bool,
 ) -> list[Individual]:
     """
-    Build the initial population.
+    Build the initial population using graph-based clique sampling.
 
-    Strategy: first try random combos (fast). If the target size isn't reached
-    after many attempts, fall back to exhaustive enumeration of smaller sizes
-    (size 3, then 4) to guarantee at least some valid individuals.
+    Improvements over naive random sampling:
+      1. Adjacency graph — all pairwise filters evaluated once upfront;
+         clique growth guarantees every drawn combo passes all filters
+         without re-checking pairs.  Hit rate goes from ~0% to ~100%.
+      2. Stratified size buckets — equal quota per combo size so all
+         sizes are represented, not just the central tendency.
+      3. Dissimilarity weighting — starting node biased toward strategies
+         not yet in the population to maximise diversity.
+      4. Exhaustive fallback uses adjacency sets (O(1) pair lookup).
     """
-    names       = list(strategies.keys())
-    target      = config.ga_population_size
-    population  : list[Individual] = []
-    seen        : set[tuple]       = set()
+    names  = list(strategies.keys())
+    target = config.ga_population_size
+    sizes  = list(range(
+        config.min_strategies,
+        min(config.max_strategies, len(names)) + 1,
+    ))
+
+    # ── Build adjacency graph (O(N²) index lookups, done once) ───────────────
+    if verbose:
+        print("  Building compatibility graph...")
+
+    adj = _build_adjacency(
+        names, strategies, config, monthly_cache, rolling_cache, universe
+    )
+
+    n_pairs  = len(names) * (len(names) - 1) // 2
+    n_compat = sum(len(v) for v in adj.values()) // 2
+    if verbose:
+        print(f"  Compatible pairs: {n_compat}/{n_pairs} "
+              f"({n_compat / max(1, n_pairs) * 100:.1f}%)\n")
+
+    if n_compat == 0:
+        if verbose:
+            print("  No compatible pairs at all — check filter thresholds.\n")
+        return []
+
+    # ── Stratified size quotas ────────────────────────────────────────────────
+    n_sizes   = len(sizes)
+    base      = target // n_sizes
+    remainder = target % n_sizes
+    quota     = {s: base + (1 if i < remainder else 0)
+                 for i, s in enumerate(sizes)}   # sum == target
+
+    population : list[Individual] = []
+    seen       : set[tuple]       = set()
+    attempts   = 0
     max_attempts = target * config.ga_seed_attempts_multiplier
 
     if verbose:
@@ -273,26 +383,59 @@ def _seed_population(
         disable=not verbose,
     ) as bar:
 
-        # ── Phase 1: random sampling ──────────────────────────────────────────
-        for _ in range(max_attempts):
-            if len(population) >= target:
-                break
-            size  = rng.randint(config.min_strategies,
-                                min(config.max_strategies, len(names)))
-            combo = tuple(sorted(rng.sample(names, size)))
-            if combo in seen:
-                continue
-            seen.add(combo)
-            vp = _is_valid(combo, strategies, config, monthly_cache, rolling_cache, universe)
-            if vp is not None:
-                population.append(Individual(combo=combo, vp=vp))
-                bar.update(1)
+        # ── Phase 1: graph-based clique sampling ──────────────────────────────
+        # Start with uniform weights; updated every 10 new individuals
+        uniform = 1.0 / len(names)
+        sw = [uniform] * len(names)
+        diversity_update = 0
 
-        # ── Phase 2: exhaustive fallback (size 3 → 4 → ...) ──────────────────
+        while len(population) < target and attempts < max_attempts:
+            # Choose a size from buckets that still have quota; fall back freely
+            remaining_sizes = [s for s in sizes if quota.get(s, 0) > 0]
+            size = rng.choice(remaining_sizes if remaining_sizes else sizes)
+
+            # Dissimilarity weights: recompute every 10 new individuals
+            if len(population) > diversity_update:
+                freq = {n: 0 for n in names}
+                for ind in population:
+                    for s in ind.combo:
+                        freq[s] += 1
+                sw    = [1.0 / (freq[n] + 1) for n in names]
+                sw_sum = sum(sw)
+                sw    = [w / sw_sum for w in sw]
+                diversity_update = len(population) + 10
+
+            combo = _sample_clique(adj, names, size, rng, start_weights=sw)
+            attempts += 1
+
+            if combo is None or combo in seen:
+                if attempts % 200 == 0:
+                    rate = len(population) / attempts if attempts else 0.0
+                    bar.set_postfix(tried=f"{attempts:,}", found=len(population),
+                                    rate=f"{rate:.1%}")
+                continue
+
+            seen.add(combo)
+
+            # Filters are guaranteed by the graph — only rescale + validate needed
+            weights_eq = equal_weight(list(combo))
+            portfolio  = build_weighted_portfolio(combo, strategies, weights_eq)
+            scaled     = rescale(combo, "equal", weights_eq, portfolio, config)
+            vp         = validate(scaled, config)
+
+            population.append(Individual(combo=combo, vp=vp))
+            quota[size] = quota.get(size, 0) - 1
+            bar.update(1)
+
+            if attempts % 200 == 0:
+                rate = len(population) / attempts if attempts else 0.0
+                bar.set_postfix(tried=f"{attempts:,}", found=len(population),
+                                rate=f"{rate:.1%}")
+
+        # ── Phase 2: exhaustive fallback ──────────────────────────────────────
         if len(population) < target:
             bar.set_description("  Seeding (exhaustive fallback)")
-            for size in range(config.min_strategies,
-                              min(config.max_strategies, len(names)) + 1):
+            for size in sizes:
                 if len(population) >= target:
                     break
                 for combo in iter_combinations(names, size):
@@ -302,13 +445,20 @@ def _seed_population(
                     if combo in seen:
                         continue
                     seen.add(combo)
-                    vp = _is_valid(
-                        combo, strategies, config, monthly_cache,
-                        rolling_cache, universe,
-                    )
-                    if vp is not None:
-                        population.append(Individual(combo=combo, vp=vp))
-                        bar.update(1)
+                    # Use adjacency sets — O(1) per pair, no filter re-evaluation
+                    combo_lst = list(combo)
+                    if not all(
+                        combo_lst[j] in adj[combo_lst[i]]
+                        for i in range(len(combo_lst))
+                        for j in range(i + 1, len(combo_lst))
+                    ):
+                        continue
+                    weights_eq = equal_weight(combo_lst)
+                    portfolio  = build_weighted_portfolio(combo, strategies, weights_eq)
+                    scaled     = rescale(combo, "equal", weights_eq, portfolio, config)
+                    vp         = validate(scaled, config)
+                    population.append(Individual(combo=combo, vp=vp))
+                    bar.update(1)
 
     if verbose:
         print(f"  Seeded {len(population)} valid individuals.\n")

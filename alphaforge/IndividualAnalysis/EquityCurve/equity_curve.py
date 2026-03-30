@@ -55,7 +55,7 @@ def _drawdown_pct(equity: np.ndarray) -> np.ndarray:
     return (equity - peak) / peak * 100
 
 
-def _benchmark(dates: pd.Series, initial_capital: float, annual_return: float = 0.05) -> np.ndarray:
+def _benchmark(dates: pd.Series, initial_capital: float, annual_return: float = 0.025) -> np.ndarray:
     t0    = dates.iloc[0]
     years = (dates - t0).dt.total_seconds() / (365.25 * 86_400)
     return initial_capital * (1 + annual_return) ** years.values
@@ -193,7 +193,7 @@ def run_dashboard(
     strategies,
     *,
     initial_capital: float = 10_000,
-    benchmark_return: float = 0.05,
+    benchmark_return: float = 0.025,
     port: int = 8050,
     debug: bool = False,
 ) -> None:
@@ -203,7 +203,7 @@ def run_dashboard(
     Args:
         strategies:        dict {name: df} OR a single trades DataFrame.
         initial_capital:   Starting equity in USD (default 10 000).
-        benchmark_return:  Annual return for the benchmark line (default 5 %).
+        benchmark_return:  Annual return for the benchmark line (default 2.5 %).
         port:              Local port (default 8050).
         debug:             Enable Dash debug/hot-reload mode.
     """

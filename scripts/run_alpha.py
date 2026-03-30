@@ -11,6 +11,8 @@ Usage:
 """
 
 import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import warnings
 
 from alphaforge.loader import load_folder
@@ -43,13 +45,29 @@ def _extract_pair(strategy_name: str) -> str:
 
 
 if __name__ == "__main__":
-    key     = sys.argv[1] if len(sys.argv) > 1 else None
-    capital = float(sys.argv[2]) if len(sys.argv) > 2 else DEFAULT_CAPITAL
+    raw = sys.argv[1:]
+    folder = next((a.split("=", 1)[1] if "=" in a else raw[raw.index(a) + 1]
+                   for a in raw if a == "--folder" or a.startswith("--folder=")),
+                  DEFAULT_FOLDER)
+    _skip = False
+    _positional = []
+    for a in raw:
+        if _skip:
+            _skip = False
+            continue
+        if a == "--folder":
+            _skip = True
+            continue
+        if a.startswith("--folder="):
+            continue
+        _positional.append(a)
+    key     = _positional[0] if len(_positional) > 0 else None
+    capital = float(_positional[1]) if len(_positional) > 1 else DEFAULT_CAPITAL
 
     # ── Load strategies ────────────────────────────────────────────────────────
-    strategies = load_folder(DEFAULT_FOLDER)
+    strategies = load_folder(folder)
     if not strategies:
-        print("No strategies found in strategies/approved/. Exiting.")
+        print(f"No strategies found in {folder}. Exiting.")
         sys.exit(1)
 
     strategy_name, trades_df = _pick_strategy(strategies, key)

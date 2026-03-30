@@ -5,100 +5,269 @@
 FOLDER STRUCTURE
 ----------------
   strategies/
-    raw/          Drop new SQX exports here (not yet analysed).
+    raw/          Drop new SQX exports here (not yet individually analysed).
     approved/     Strategies that passed individual analysis.
                   The portfolio generator reads from here.
 
-  portfolios/     Auto-generated. Wiped before every portfolio run.
+  TradingData/    Full strategy universe (all strategies, used by the expander).
+                  Organised by asset subfolder — asset symbol read from Symbol
+                  column, not from folder name.
+
+  portfolios/     Auto-generated. Wiped before every run_portfolio.py run.
                   One subfolder per top combination found:
 
                   portfolios/
                     Combination001/
-                      strategies/     Raw CSV files for this combination.
-                      Equal/          Excel + PDF report (equal weight).
-                      HRP/            Excel + PDF report (HRP weight).
-                      MinVariance/    Excel + PDF report (min-variance).
-                      RiskParity/     Excel + PDF report (risk parity).
+                      strategies/   Drop CSVs here for run_analysisPortfolio.py
+                      Equal/        Excel + PDF report (equal weight)
+                      HRP/          Excel + PDF report (HRP weight)
+                      MinVariance/  Excel + PDF report (min-variance)
+                      RiskParity/   Excel + PDF report (risk parity)
                     Combination002/
                       ...
 
-  AssetsData/     D1 price CSVs used by the alpha / regime analysis tools.
+  AssetsData/     D1 price CSVs used by the alpha / regime analysis scripts.
+
+  scripts/        Individual strategy analysis scripts (Step 1).
+  alphaforge/     Core library — do not edit unless you know what you're doing.
 
 
---------------------------------------------------------------------------------
-WORKFLOW
---------------------------------------------------------------------------------
+================================================================================
+  STEP 1 — Analyse strategies individually
+================================================================================
 
-STEP 1 — Analyse strategies individually
------------------------------------------
-Before adding a strategy to the approved folder, run the individual tools
-to check whether it has real alpha:
+Before approving a strategy, run the individual analysis tools to check
+whether it has real alpha. All scripts read from strategies/approved/ by
+default, or accept a path / strategy key as an argument.
 
-  python scripts/run_equity.py "AUDJPY/Strategy 7"       # equity curve
-  python scripts/run_alpha.py  "AUDJPY/Strategy 7"       # alpha detection
-  python scripts/run_distribution.py "AUDJPY/Strategy 7" # return distribution
-  python scripts/run_regime.py "AUDJPY/Strategy 7"       # regime analysis
-  python scripts/run_advanced.py "AUDJPY/Strategy 7"     # advanced alpha tests
-  python scripts/run_rolling_alpha.py "AUDJPY/Strategy 7"# rolling alpha/beta
-  python scripts/run_mc.py "AUDJPY/Strategy 7"           # Monte Carlo
+  python -m scripts.run_equity       "AUDJPY/Strategy 7"    # equity curve
+  python -m scripts.run_alpha        "AUDJPY/Strategy 7"    # alpha detection
+  python -m scripts.run_distribution "AUDJPY/Strategy 7"    # return distribution
+  python -m scripts.run_regime       "AUDJPY/Strategy 7"    # regime analysis
+  python -m scripts.run_advanced     "AUDJPY/Strategy 7"    # advanced alpha tests
+  python -m scripts.run_rolling_alpha "AUDJPY/Strategy 7"   # rolling alpha/beta
+  python -m scripts.run_mc           "AUDJPY/Strategy 7"    # Monte Carlo
 
-All scripts default to strategies/approved/ unless you pass a folder path.
-You can omit the strategy key to auto-pick the first one found.
+  You can omit the strategy key to auto-pick the first one found in the folder.
 
-Once happy, move the CSV from strategies/raw/ to strategies/approved/.
+  Once happy, move the CSV from strategies/raw/ to strategies/approved/.
 
 
-STEP 2 — Generate portfolios
-------------------------------
-  python run_portfolio.py
+================================================================================
+  STEP 2 — Generate portfolios
+================================================================================
 
-  Options:
-    --capital     <amount>    Account balance in USD  (default: 10000)
-    --daily-limit <pct>       Daily loss limit in %   (default: 4)
-    --total-limit <pct>       Max total drawdown in % (default: 9)
-    --min         <n>         Min strategies per portfolio (default: 3)
-    --max         <n>         Max strategies per portfolio (default: 8)
-    --portfolios  <n>         Combinations to sample    (default: 10000)
+  python run_portfolio.py [OPTIONS]
+
+  ACCOUNT
+    --capital     <amount>    Account balance in USD          (default: 10000)
+    --daily-limit <pct>       Daily loss limit in %           (default: 5)
+    --total-limit <pct>       Max total drawdown in %         (default: 9)
+
+  PORTFOLIO SIZE
+    --min         <n>         Min strategies per portfolio    (default: 8)
+    --max         <n>         Max strategies per portfolio    (default: 15)
+
+  GENERATION METHOD
+    (no flag)                 Random sampling
+    --ga                      Genetic algorithm (slower, higher quality)
+    --portfolios  <n>         Random combinations to attempt  (default: 50000)
     --seed        <n>         Random seed for reproducibility
 
-  Example:
-    python run_portfolio.py --capital 50000 --min 4 --max 7 --portfolios 50000
+  GENETIC ALGORITHM (only with --ga)
+    --population  <n>         Individuals per generation      (default: 100)
+    --generations <n>         Max generations                 (default: 150)
 
-  What it does:
-    1. Cleans the portfolios/ folder.
+  CORRELATION FILTERS
+    --window-hours <h>        Min hours between trades on same asset (default: 8)
+    --no-rolling              Disable rolling correlation filter
+    --no-co-loss              Disable co-loss frequency filter
+    --no-tail                 Disable tail correlation filter
+    --no-same-asset           Disable same-asset time-window filter
+
+  EXAMPLES
+    python run_portfolio.py
+    python run_portfolio.py --ga
+    python run_portfolio.py --capital 50000 --daily-limit 4 --total-limit 8
+    python run_portfolio.py --min 6 --max 12 --portfolios 100000
+    python run_portfolio.py --ga --population 150 --generations 200
+    python run_portfolio.py --ga --no-rolling --no-co-loss   # relaxed filters
+
+  WHAT IT DOES
+    1. Wipes the portfolios/ folder.
     2. Loads all strategies from strategies/approved/.
-    3. Filters combinations by correlation, drawdown, and MAE stress test.
-    4. Saves the top combinations to portfolios/ (strategy CSVs + reports).
-    5. Opens three analysis dashboards (correlation, portfolio, Monte Carlo).
+    3. Builds a universe (correlation matrices, same-asset overlap).
+    4. Generates combinations, filters by all enabled correlation rules.
+    5. Scores by fitness: 60% Return/DD + 30% Annual Return + 10% Win Months.
+    6. Runs MAE stress test and walk-forward equity on the top combinations.
+    7. Saves reports (Excel + PDF) to portfolios/CombinationXXX/.
+    8. Opens three dashboards: Portfolio Explorer, Correlation Analysis, Monte Carlo.
+
+  FILTER DEFAULTS (edit alphaforge/portfolio/config.py to change permanently)
+    Pearson correlation (static)    <= 0.30
+    Spearman correlation (static)   <= 0.30
+    Co-loss frequency               <= 0.30
+    Tail correlation (bottom 30%)   <= 0.50
+    Same-asset window               8 hours
+    Rolling Pearson/Spearman        <= 0.40  (all windows)
+                                    <= 0.30  (last 4 years)
+    Rolling window size             48 months
 
 
-STEP 3 — Analyse results (coming soon: run_analysis.py)
----------------------------------------------------------
-  python run_analysis.py portfolios/
-      → All combinations with navigator (same as after Step 2).
+================================================================================
+  STEP 3 — View portfolio results
+================================================================================
 
-  python run_analysis.py portfolios/Combination001/strategies/
-      → Single combination deep-dive.
+  PORTFOLIO EXPLORER DASHBOARD (opens automatically after Step 2)
+  ---------------------------------------------------------------
+  Navigate combinations with < Prev / Next >.
 
-  python run_analysis.py strategies/approved/AUDJPY/Strategy\ 7.csv
-      → Full individual analysis for one strategy.
+  Left panel   : Strategy table — name, asset, weights per method, risk/trade,
+                 scale factor, DD status.  Scroll with mouse wheel.
 
-  You can also create any folder, drop strategy CSVs in it, and point
-  run_analysis.py at it — no need to run the generator first.
+  Top right    : Equity curves — 4 weighting methods (Equal, Min Variance,
+                 Risk Parity, HRP). WF (walk-forward) lines shown in matching
+                 dashed colours. Click "WF: ON/OFF" to toggle WF lines.
+
+  Bottom left  : Static metrics table — metrics computed on the full backtest
+                 for each method: Sharpe, CAGR, Profit, Return/DD, Win%,
+                 Profit Factor, Max DD%, Max DD$, Num Trades, DD Status,
+                 MAE Stress.
+
+  Bottom right : WF metrics table — same metrics recomputed on the walk-forward
+                 equity (IS period with static weights + OOS with WF weights).
+                 Equal Weight column always shows static values (WF = static).
+                 Profit Factor, Num Trades, MAE Stress shown as "—" (not
+                 derivable from equity curve alone).
+
+  Buttons
+    WF: ON / WF: OFF   Toggle walk-forward equity lines on the chart.
+    WF Weights         Open a separate table showing WF weight per strategy
+                       per OOS window, switchable between methods.
+
+  WALK-FORWARD EQUITY EXPLAINED
+    IS period  (before first OOS window): uses static method weights.
+    OOS windows (rolling, non-overlapping): weights re-trained on IS data
+    before each window. Each window gets its own scale_factor derived from
+    the IS daily P&L under those weights, so the daily loss limit is
+    respected in every window.
+
+  CORRELATION DASHBOARD (opens automatically after Step 2)
+  ---------------------------------------------------------
+  Switch between combinations via the dropdown.
+  Switch between methods (Equal, Min Variance, Risk Parity, HRP) via buttons.
+  Shows: Pearson matrix, Spearman matrix, co-loss matrix, rolling correlations
+  (line chart — breaching pairs highlighted in colour with labels).
+
+  MONTE CARLO DASHBOARD (opens automatically after Step 2)
+  ---------------------------------------------------------
+  Block bootstrap simulation (10,000 paths by default).
+  Shows fan chart of simulated equity curves with percentile bands.
 
 
---------------------------------------------------------------------------------
-TIPS
---------------------------------------------------------------------------------
-  - TradingData/ is kept for backwards compatibility but is no longer used.
-    New strategies should go into strategies/raw/ or strategies/approved/.
+================================================================================
+  STEP 4 — Analyse existing portfolios
+================================================================================
+
+  Use this to view dashboards for portfolios you already have running —
+  without re-running the generator.
+
+  HOW TO USE
+    1. Create a folder:  portfolios/CombinationXXX/strategies/
+    2. Drop the strategy CSVs inside (any naming convention, asset symbol is
+       read from the Symbol column — no folder structure required).
+    3. Run:
+         python run_analysisPortfolio.py
+         python run_analysisPortfolio.py my_folder/   # custom root folder
+
+  Multiple combinations can be loaded at once — one Combination*/ folder each.
+  The script re-scores all combinations together (normalised fitness) and opens
+  all 3 dashboards exactly as after Step 2.
+
+
+================================================================================
+  STEP 5 — Expand an existing portfolio
+================================================================================
+
+  Keeps your current portfolio fixed and searches TradingData/ for the best
+  additional strategies to add — only candidates that pass all filters with
+  every existing strategy (and with each other) are considered.
+  The search is exhaustive over all valid addition subsets.
+
+  python run_expandPortfolio.py [OPTIONS]
+
+  BASE PORTFOLIO
+    --base   <path>    Path to the base Combination folder
+                       (default: portfolios/Combination001)
+    --max    <n>       Max total strategies after expansion   (default: 10)
+
+  FILTER OVERRIDES (same logic as run_portfolio.py)
+    --pearson    <v>   Relax Pearson threshold   (e.g. 0.45)
+    --spearman   <v>   Relax Spearman threshold  (e.g. 0.55)
+    --rolling    <v>   Relax rolling threshold — sets both general and recent
+                       to the same value         (e.g. 0.50)
+    --no-rolling       Disable rolling correlation filter entirely
+    --no-co-loss       Disable co-loss filter
+    --no-tail          Disable tail correlation filter
+    --no-same-asset    Disable same-asset window filter
+
+  EXAMPLES
+    python run_expandPortfolio.py
+    python run_expandPortfolio.py --base portfolios/Combination002 --max 12
+    python run_expandPortfolio.py --no-rolling
+    python run_expandPortfolio.py --no-rolling --pearson 0.45 --spearman 0.55
+    python run_expandPortfolio.py --no-rolling --no-co-loss --no-tail --no-same-asset
+
+  NOTE  If no candidates pass the filters, start with --no-rolling (the rolling
+        filter is the most restrictive). Then relax Pearson/Spearman if needed.
+
+  WHAT IT DOES
+    1. Loads base portfolio from <base>/strategies/.
+    2. Loads all of TradingData/ — skips strategies already in the base.
+    3. Filters candidates against every base strategy (all enabled filters).
+    4. Exhaustively evaluates all valid addition subsets (size 1 to max-base).
+    5. Scores, prints a ranked table, runs stress test + walk-forward, opens dashboards.
+
+
+================================================================================
+  CORRELATION VISUALISATION
+================================================================================
+
+  View static and rolling correlation matrices for the full strategy universe.
+
+  python -m scripts.run_corr_viz
+
+  Shows:
+    - Static matrices: Pearson, Spearman, Co-loss, Same-asset overlap
+    - Rolling max |correlation| matrices
+    - Filter compatibility matrix (pass/fail per filter)
+  Strategy labels coloured by asset. Red borders on cells exceeding thresholds.
+  Console prints compatible pair counts per filter.
+
+
+================================================================================
+  TIPS
+================================================================================
 
   - portfolios/ is wiped automatically on every run_portfolio.py run.
-    If you want to keep a set of results, copy the folder elsewhere first.
+    Copy the folder elsewhere first if you want to keep results.
 
-  - All scripts can be run from the project root:
+  - All config defaults live in alphaforge/portfolio/config.py.
+    Edit there to change thresholds permanently (Pearson, rolling window, etc.)
+    instead of passing flags every run.
+
+  - TradingData/ is the full universe used by run_expandPortfolio.py.
+    strategies/approved/ is the curated set used by run_portfolio.py.
+    Keep both in sync when you approve new strategies.
+
+  - Run scripts from the project root:
       cd /path/to/AlphaForge
       python run_portfolio.py
+
+  - Scripts in scripts/ must be run as modules (note the -m flag):
+      python -m scripts.run_equity "AUDJPY/Strategy 7"
+    NOT:
+      python scripts/run_equity.py "AUDJPY/Strategy 7"
 
   - Qt display error on Linux? Run:
       sudo apt-get install libxcb-cursor0

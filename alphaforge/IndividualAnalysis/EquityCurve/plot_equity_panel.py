@@ -92,7 +92,7 @@ def _equity_series(df: pd.DataFrame, initial_capital: float):
 
 
 def _benchmark(dates: pd.Series, initial_capital: float,
-               annual_return: float = 0.05) -> np.ndarray:
+               annual_return: float = 0.025) -> np.ndarray:
     t0    = dates.iloc[0]
     years = (dates - t0).dt.total_seconds() / (365.25 * 86_400)
     return initial_capital * (1 + annual_return) ** years.values
@@ -136,7 +136,7 @@ TOP PANEL — Equity Curve
   after closing that trade.
 
   Cyan line     = your strategy's equity
-  Grey dashed   = simple buy-and-hold benchmark (5%/yr)
+  Grey dashed   = simple buy-and-hold benchmark (2.5%/yr)
 
   When your equity is above the benchmark line,
   you are generating excess return (alpha). When it
@@ -197,7 +197,7 @@ def _draw_panels(ax_eq, ax_dd, df_full, df_view,
                         alpha=0.15, color=_RED, zorder=2)
     ax_eq.plot(dates, bench, color=_BENCH, linewidth=1.2,
                linestyle="--", alpha=0.7,
-               label=f"Benchmark ({benchmark_return*100:.0f}%/yr)", zorder=3)
+               label=f"Benchmark ({benchmark_return*100:.2f}%/yr)", zorder=3)
     ax_eq.axhline(initial_capital, color=_DIM,
                   linewidth=0.8, linestyle=":", alpha=0.5)
 
@@ -317,7 +317,7 @@ def plot_equity_panel(
     all_strategies:   dict,
     initial_key:      str,
     initial_capital:  float = 10_000.0,
-    benchmark_return: float = 0.05,
+    benchmark_return: float = 0.025,
 ) -> None:
     """Launch the interactive equity curve panel."""
 

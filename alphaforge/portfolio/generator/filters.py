@@ -172,22 +172,43 @@ def co_loss_filter(
 def same_asset_conflict_filter(
     df_a: pd.DataFrame,
     df_b: pd.DataFrame,
-    same_day: bool = True,
+    window_hours: float = 8.0,
 ) -> bool:
     """
-    True (PASS) if no trades open on the same asset at the same time.
+    True (PASS) if no two trades from different strategies open on the same
+    asset within `window_hours` of each other.
 
-    same_day=True  → conflict = same asset, same calendar day  (default)
-    same_day=False → conflict = same asset, same bar (exact datetime match)
+    For each symbol traded by both strategies, checks every pair of open times
+    (one from each strategy) using a sorted binary-search scan.
+
+    window_hours = 0.0 → filter disabled (always passes).
     """
-    if same_day:
-        keys_a = set(zip(df_a["Symbol"], df_a["Open time"].dt.date))
-        keys_b = set(zip(df_b["Symbol"], df_b["Open time"].dt.date))
-    else:
-        keys_a = set(zip(df_a["Symbol"], df_a["Open time"]))
-        keys_b = set(zip(df_b["Symbol"], df_b["Open time"]))
+    import numpy as np
 
-    return len(keys_a & keys_b) == 0
+    if window_hours <= 0:
+        return True
+
+    window_ns = np.timedelta64(int(window_hours * 3_600 * 1_000_000_000), "ns")
+
+    symbols_a = set(df_a["Symbol"].unique())
+    symbols_b = set(df_b["Symbol"].unique())
+
+    for symbol in symbols_a & symbols_b:
+        ta_arr = df_a.loc[df_a["Symbol"] == symbol, "Open time"].values
+        tb_arr = df_b.loc[df_b["Symbol"] == symbol, "Open time"].values
+
+        if ta_arr.size == 0 or tb_arr.size == 0:
+            continue
+
+        ta_arr = np.sort(ta_arr)
+        tb_arr = np.sort(tb_arr)
+
+        for ta in ta_arr:
+            lo = np.searchsorted(tb_arr, ta - window_ns)
+            if lo < len(tb_arr) and tb_arr[lo] <= ta + window_ns:
+                return False  # conflict within window
+
+    return True
 
 
 # ── Rolling filter functions ──────────────────────────────────────────────────
@@ -293,18 +314,18 @@ def _apply_static_filters(
                 if abs(universe.spearman(a_name, b_name)) > config.max_spearman_corr:
                     stats.rejected_spearman += 1
                     return False
-                if universe.co_loss(a_name, b_name) > config.max_co_loss_freq:
+                if config.enable_co_loss_filter and universe.co_loss(a_name, b_name) > config.max_co_loss_freq:
                     stats.rejected_co_loss += 1
                     return False
-                if universe.has_overlap(a_name, b_name):
+                if config.enable_same_asset_filter and universe.has_overlap(a_name, b_name):
                     stats.rejected_same_asset += 1
                     return False
-                # Tail correlation is not pre-computed in Universe — always computed live
-                a_m = monthly_cache[a_name]
-                b_m = monthly_cache[b_name]
-                if not tail_correlation_filter(a_m, b_m, config.tail_percentile, config.max_tail_corr):
-                    stats.rejected_tail_corr += 1
-                    return False
+                if config.enable_tail_corr_filter:
+                    a_m = monthly_cache[a_name]
+                    b_m = monthly_cache[b_name]
+                    if not tail_correlation_filter(a_m, b_m, config.tail_percentile, config.max_tail_corr):
+                        stats.rejected_tail_corr += 1
+                        return False
             else:
                 # Fallback: compute from raw monthly series
                 a_m = monthly_cache[a_name]
@@ -316,14 +337,14 @@ def _apply_static_filters(
                 if not spearman_filter(a_m, b_m, config.max_spearman_corr):
                     stats.rejected_spearman += 1
                     return False
-                if not co_loss_filter(a_m, b_m, config.max_co_loss_freq):
+                if config.enable_co_loss_filter and not co_loss_filter(a_m, b_m, config.max_co_loss_freq):
                     stats.rejected_co_loss += 1
                     return False
-                if not tail_correlation_filter(a_m, b_m, config.tail_percentile, config.max_tail_corr):
+                if config.enable_tail_corr_filter and not tail_correlation_filter(a_m, b_m, config.tail_percentile, config.max_tail_corr):
                     stats.rejected_tail_corr += 1
                     return False
-                if not same_asset_conflict_filter(
-                    strategies[a_name], strategies[b_name], config.same_asset_same_day
+                if config.enable_same_asset_filter and not same_asset_conflict_filter(
+                    strategies[a_name], strategies[b_name], config.same_asset_window_hours
                 ):
                     stats.rejected_same_asset += 1
                     return False

@@ -37,6 +37,7 @@ from alphaforge.portfolio.generator.scaler import rescale
 from alphaforge.portfolio.generator.validator import validate, ValidPortfolio
 from alphaforge.portfolio.generator.combo_result import CombinationResult
 from alphaforge.portfolio.generator.fitness import score_combinations
+from alphaforge.portfolio.generator.wf import compute_all_wf_equities
 
 
 # ── Step 3: Raw DD check (equal-weight scaled) ────────────────────────────────
@@ -252,7 +253,7 @@ class PipelineResult:
             "spearman"   : "Spearman correlation    → lower max_spearman_corr",
             "co_loss"    : "Co-loss frequency       → raise max_co_loss_freq",
             "tail_corr"  : "Tail correlation        → raise max_tail_corr or lower tail_percentile",
-            "same_asset" : "Same-asset conflict     → set same_asset_same_day=False",
+            "same_asset" : "Same-asset conflict     → increase same_asset_window_hours",
             "dd"         : "Total drawdown (DD check)→ raise total_drawdown_limit_pct",
             "rolling"    : "Rolling correlation     → raise max_rolling_corr / max_rolling_corr_recent",
         }
@@ -285,7 +286,7 @@ def run_pipeline(
 
     universe = build_universe(
         strategies,
-        same_asset_same_day=config.same_asset_same_day,
+        same_asset_window_hours=config.same_asset_window_hours,
         verbose=verbose,
     )
 
@@ -365,6 +366,10 @@ def run_pipeline(
                   f"{n_valid} portfolios passed DD validation.")
 
         break  # first successful round — stop
+
+    # Walk-forward equity (computed once, after pipeline, on final combo list)
+    if all_combos:
+        compute_all_wf_equities(all_combos, strategies, config, verbose=verbose)
 
     # Sort by fitness score descending
     all_combos.sort(key=lambda cr: cr.fitness_score, reverse=True)

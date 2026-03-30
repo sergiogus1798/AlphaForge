@@ -15,6 +15,8 @@ Usage:
 """
 
 import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import warnings
 
 from alphaforge.loader import load_folder
@@ -27,6 +29,7 @@ DEFAULT_CAPITAL = 10_000.0
 
 
 def _parse_args():
+    folder        = DEFAULT_FOLDER
     key           = None
     n_states      = 3
     capital       = DEFAULT_CAPITAL
@@ -36,7 +39,11 @@ def _parse_args():
     i = 0
     while i < len(args):
         a = args[i]
-        if a == "--states" and i + 1 < len(args):
+        if a == "--folder" and i + 1 < len(args):
+            folder = args[i + 1]; i += 2
+        elif a.startswith("--folder="):
+            folder = a.split("=", 1)[1]; i += 1
+        elif a == "--states" and i + 1 < len(args):
             n_states = int(args[i + 1]); i += 2
         elif a == "--capital" and i + 1 < len(args):
             capital = float(args[i + 1]); i += 2
@@ -47,7 +54,7 @@ def _parse_args():
         else:
             i += 1
 
-    return key, n_states, capital, smooth_window
+    return folder, key, n_states, capital, smooth_window
 
 
 def _pick_strategy(strategies: dict, key: str | None):
@@ -67,11 +74,11 @@ def _extract_pair(strategy_name: str) -> str:
 
 
 if __name__ == "__main__":
-    key, n_states, capital, smooth_window = _parse_args()
+    folder, key, n_states, capital, smooth_window = _parse_args()
 
-    strategies = load_folder(DEFAULT_FOLDER)
+    strategies = load_folder(folder)
     if not strategies:
-        print("No strategies found in strategies/approved/. Exiting.")
+        print(f"No strategies found in {folder}. Exiting.")
         sys.exit(1)
 
     strategy_name, trades_df = _pick_strategy(strategies, key)

@@ -42,7 +42,7 @@ print(f"\n  {len(strategies)} strategies loaded.\n")
 config_relaxed = PortfolioConfig(
     min_strategies=5, max_strategies=5,
     max_pearson_corr=0.99, max_spearman_corr=0.99,
-    max_co_loss_freq=0.99, same_asset_same_day=False,
+    max_co_loss_freq=0.99, same_asset_window_hours=0.0,
     n_portfolios=200, random_seed=42,
 )
 combinations = sample_combinations(strategies, config_relaxed)

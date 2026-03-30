@@ -338,7 +338,13 @@ def plot_rolling_alpha(
         import tkinter as tk
         from tkinter import ttk
 
-        popup = tk.Toplevel()
+        # Under TkAgg the canvas manager owns the Tk root — use it as parent
+        try:
+            root = fig.canvas.manager.window
+        except Exception:
+            root = None
+
+        popup = tk.Toplevel(root)
         popup.title("Select Strategy")
         popup.configure(bg="#0d1117")
         popup.geometry("420x480")
@@ -403,7 +409,7 @@ def plot_rolling_alpha(
                   relief=tk.FLAT, padx=10).pack(side=tk.RIGHT, padx=(0, 6))
 
         popup.lift()
-        popup.grab_set()
+        popup.focus_force()
 
     btn_sel.on_clicked(_open_selector)
 

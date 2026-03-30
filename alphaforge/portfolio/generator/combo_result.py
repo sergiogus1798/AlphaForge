@@ -46,6 +46,8 @@ class CombinationResult:
     raw_metrics   : dict                 # full metrics of equal-weight scaled portfolio
     portfolios    : dict                 # method -> ValidPortfolio | None
     fitness_score : float = 0.0         # composite normalised fitness score
+    wf_equity     : dict  = field(default_factory=dict)  # method -> pd.Series | None (walk-forward OOS equity)
+    wf_weights    : dict  = field(default_factory=dict)  # method -> list[dict]  (per-window weight history)
 
     # ── Convenience ───────────────────────────────────────────────────────────
 
