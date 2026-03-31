@@ -17,8 +17,8 @@ class PortfolioConfig:
     base_risk_per_trade: float = 100.0       # $100/trade — matches backtest unit
 
     # ── Portfolio size ────────────────────────────────────────────────────────
-    min_strategies: int = 8
-    max_strategies: int = 15
+    min_strategies: int = 5
+    max_strategies: int = 10
 
     # ── Static correlation filter thresholds ─────────────────────────────────
     max_pearson_corr: float = 0.30           # monthly P&L, linear
