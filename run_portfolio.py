@@ -31,15 +31,17 @@ from alphaforge.portfolio.exporter import export_all
 from alphaforge.paths import STRATEGIES_APPROVED as DEFAULT_FOLDER, clean_portfolios_output
 
 
-def _parse_args() -> tuple[PortfolioConfig, bool]:
+def _parse_args() -> tuple[PortfolioConfig, bool, str]:
     args    = sys.argv[1:]
     kw      = {}
     use_ga  = False
+    folder  = DEFAULT_FOLDER
 
     i = 0
     while i < len(args):
         a = args[i]
         if   a == "--ga":                                                          use_ga = True; i += 1
+        elif a == "--folder"       and i + 1 < len(args): folder                         = args[i+1]; i += 2
         elif a == "--capital"      and i + 1 < len(args): kw["account_balance"]         = float(args[i+1]); i += 2
         elif a == "--daily-limit"  and i + 1 < len(args): kw["daily_loss_limit_pct"]    = float(args[i+1]) / 100; i += 2
         elif a == "--total-limit"  and i + 1 < len(args): kw["total_drawdown_limit_pct"] = float(args[i+1]) / 100; i += 2
@@ -54,13 +56,16 @@ def _parse_args() -> tuple[PortfolioConfig, bool]:
         elif a == "--no-co-loss":                          kw["enable_co_loss_filter"]    = False; i += 1
         elif a == "--no-tail":                             kw["enable_tail_corr_filter"]  = False; i += 1
         elif a == "--no-same-asset":                       kw["enable_same_asset_filter"] = False; i += 1
+        elif a == "--pair-growth":                         kw["ga_use_pair_growth"]        = True; i += 1
+        elif a == "--greedy":                              kw["ga_use_greedy"]             = True; i += 1
+        elif a == "--workers"      and i + 1 < len(args): kw["n_workers"]                 = int(args[i+1]); i += 2
         else: i += 1
 
-    return PortfolioConfig(**kw), use_ga
+    return PortfolioConfig(**kw), use_ga, folder
 
 
 if __name__ == "__main__":
-    config, use_ga = _parse_args()
+    config, use_ga, folder = _parse_args()
 
     print()
     print("=" * 56)
@@ -86,9 +91,10 @@ if __name__ == "__main__":
     clean_portfolios_output(verbose=True)
 
     # Load strategies
-    strategies = load_folder(DEFAULT_FOLDER)
+    print(f"  Folder         : {folder}")
+    strategies = load_folder(folder)
     if not strategies:
-        print("  No strategies found in strategies/approved/. Exiting.")
+        print(f"  No strategies found in {folder}. Exiting.")
         sys.exit(1)
     print(f"  {len(strategies)} strategies loaded.\n")
 

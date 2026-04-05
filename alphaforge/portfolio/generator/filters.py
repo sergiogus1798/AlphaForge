@@ -26,6 +26,48 @@ import pandas as pd
 from scipy.stats import pearsonr, spearmanr
 
 from alphaforge.portfolio.config import PortfolioConfig
+from alphaforge.portfolio.generator.parallel import pool_executor, resolve_workers
+
+
+# ── Parallelism helpers ───────────────────────────────────────────────────────
+# Module-level globals set by worker initializers so large objects are
+# serialised once per worker process, not once per task.
+
+_w_strategies    = None
+_w_config        = None
+_w_monthly_cache = None
+_w_universe      = None
+
+
+def _init_filter_workers(strategies, config, monthly_cache, universe) -> None:
+    global _w_strategies, _w_config, _w_monthly_cache, _w_universe
+    _w_strategies    = strategies
+    _w_config        = config
+    _w_monthly_cache = monthly_cache
+    _w_universe      = universe
+
+
+def _static_worker(combo: tuple) -> tuple:
+    """Worker: run static filters on one combo. Returns rejection counts."""
+    stats  = FilterStats()
+    passed = _apply_static_filters(
+        combo, _w_strategies, _w_config, _w_monthly_cache, stats,
+        universe=_w_universe,
+    )
+    return (combo, passed,
+            stats.rejected_pearson, stats.rejected_spearman,
+            stats.rejected_co_loss, stats.rejected_tail_corr,
+            stats.rejected_same_asset)
+
+
+def _rolling_worker(combo: tuple) -> tuple:
+    """Worker: run rolling filters on one combo."""
+    stats  = FilterStats()
+    passed = _apply_rolling_filters(combo, _w_config, _w_monthly_cache, stats)
+    return (combo, passed)
+
+
+_resolve_workers = resolve_workers  # local alias kept for backwards compat
 
 
 # ── Monthly P&L helpers ───────────────────────────────────────────────────────
@@ -390,20 +432,41 @@ def filter_static_only(
     Returns:
         (static_passed_combinations, monthly_cache, FilterStats)
     """
+    from concurrent.futures import ProcessPoolExecutor
     from tqdm import tqdm
 
     monthly_cache: dict[str, pd.Series] = {
         name: _monthly_pnl(df) for name, df in strategies.items()
     }
 
-    stats = FilterStats(total=len(combinations))
+    stats         = FilterStats(total=len(combinations))
     static_passed = []
+    n_workers     = _resolve_workers(config.n_workers)
 
-    with tqdm(combinations, desc="  Static filters", unit="combo", disable=not verbose) as bar:
-        for combo in bar:
-            if _apply_static_filters(combo, strategies, config, monthly_cache, stats, universe=universe):
-                static_passed.append(combo)
-            bar.set_postfix(passed=len(static_passed), tried=bar.n)
+    if n_workers > 1:
+        from concurrent.futures import as_completed
+        with pool_executor(n_workers, _init_filter_workers,
+                           (strategies, config, monthly_cache, universe)) as pool:
+            futures = [pool.submit(_static_worker, combo) for combo in combinations]
+            with tqdm(total=len(combinations), desc="  Static filters",
+                      unit="combo", disable=not verbose) as bar:
+                for future in as_completed(futures):
+                    combo, passed, rp, rs, rcl, rtc, rsa = future.result()
+                    stats.rejected_pearson    += rp
+                    stats.rejected_spearman   += rs
+                    stats.rejected_co_loss    += rcl
+                    stats.rejected_tail_corr  += rtc
+                    stats.rejected_same_asset += rsa
+                    if passed:
+                        static_passed.append(combo)
+                    bar.update(1)
+                    bar.set_postfix(passed=len(static_passed))
+    else:
+        with tqdm(combinations, desc="  Static filters", unit="combo", disable=not verbose) as bar:
+            for combo in bar:
+                if _apply_static_filters(combo, strategies, config, monthly_cache, stats, universe=universe):
+                    static_passed.append(combo)
+                bar.set_postfix(passed=len(static_passed), tried=bar.n)
 
     stats.passed_static = len(static_passed)
     if verbose:
@@ -436,6 +499,7 @@ def filter_rolling_only(
     Returns:
         (passed_combinations, FilterStats)
     """
+    from concurrent.futures import ProcessPoolExecutor
     from tqdm import tqdm
 
     if stats is None:
@@ -445,13 +509,30 @@ def filter_rolling_only(
             passed_dd=len(combinations),
         )
 
-    final_passed: list[tuple[str, ...]] = []
+    final_passed : list[tuple[str, ...]] = []
+    n_workers    = _resolve_workers(config.n_workers)
 
-    with tqdm(combinations, desc="  Rolling filters", unit="combo", disable=not verbose) as bar:
-        for combo in bar:
-            if _apply_rolling_filters(combo, config, monthly_cache, stats):
-                final_passed.append(combo)
-            bar.set_postfix(passed=len(final_passed), tried=bar.n)
+    if n_workers > 1:
+        from concurrent.futures import as_completed
+        with pool_executor(n_workers, _init_filter_workers,
+                           (None, config, monthly_cache, None)) as pool:
+            futures = [pool.submit(_rolling_worker, combo) for combo in combinations]
+            with tqdm(total=len(combinations), desc="  Rolling filters",
+                      unit="combo", disable=not verbose) as bar:
+                for future in as_completed(futures):
+                    combo, passed = future.result()
+                    if not passed:
+                        stats.rejected_rolling += 1
+                    else:
+                        final_passed.append(combo)
+                    bar.update(1)
+                    bar.set_postfix(passed=len(final_passed))
+    else:
+        with tqdm(combinations, desc="  Rolling filters", unit="combo", disable=not verbose) as bar:
+            for combo in bar:
+                if _apply_rolling_filters(combo, config, monthly_cache, stats):
+                    final_passed.append(combo)
+                bar.set_postfix(passed=len(final_passed), tried=bar.n)
 
     stats.passed_rolling = len(final_passed)
 

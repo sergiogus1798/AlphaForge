@@ -57,9 +57,9 @@ from alphaforge.portfolio.stress.mae_stress import stress_test_all
 from alphaforge.portfolio.dashboard import run_portfolio_dashboard
 from alphaforge.portfolio.dashboard_corr import run_correlation_dashboard
 from alphaforge.portfolio.dashboard_mc import run_mc_dashboard
-from alphaforge.paths import PORTFOLIOS_OUTPUT
+from alphaforge.paths import PORTFOLIOS_OUTPUT, STRATEGIES_APPROVED
 
-TRADING_DATA = "TradingData"
+TRADING_DATA = STRATEGIES_APPROVED
 
 
 def _basename(key: str) -> str:

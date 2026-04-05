@@ -232,14 +232,24 @@ def _asset_legend(fig, names: list[str]) -> None:
 def main() -> None:
     config = PortfolioConfig()
 
+    folder = STRATEGIES_APPROVED
+    args = sys.argv[1:]
+    i = 0
+    while i < len(args):
+        if args[i] == "--folder" and i + 1 < len(args):
+            folder = args[i + 1]; i += 2
+        else:
+            i += 1
+
     print()
     print("=" * 56)
     print("  AlphaForge — Correlation Matrix Visualisation")
     print("=" * 56)
+    print(f"  Folder : {folder}")
 
-    strategies = load_folder(STRATEGIES_APPROVED)
+    strategies = load_folder(folder)
     if not strategies:
-        print("  No strategies found in strategies/approved/. Exiting.")
+        print(f"  No strategies found in {folder}. Exiting.")
         sys.exit(1)
     print(f"  {len(strategies)} strategies loaded.\n")
 

@@ -38,6 +38,49 @@ from alphaforge.portfolio.generator.validator import validate, ValidPortfolio
 from alphaforge.portfolio.generator.combo_result import CombinationResult
 from alphaforge.portfolio.generator.fitness import score_combinations
 from alphaforge.portfolio.generator.wf import compute_all_wf_equities
+from alphaforge.portfolio.generator.parallel import pool_executor
+from alphaforge.portfolio.generator.filters import _resolve_workers
+
+
+# ── DD check parallel workers ─────────────────────────────────────────────────
+
+_dd_strategies = None
+_dd_config     = None
+
+
+def _init_dd_workers(strategies, config) -> None:
+    global _dd_strategies, _dd_config
+    _dd_strategies = strategies
+    _dd_config     = config
+
+
+def _dd_worker(combo: tuple) -> tuple:
+    """Worker: raw DD check + equal-weight scale for one combo."""
+    import pandas as _pd
+
+    weights   = equal_weight(list(combo))
+    portfolio = build_weighted_portfolio(combo, _dd_strategies, weights)
+
+    daily = (
+        portfolio
+        .groupby(portfolio["Close time"].dt.date)["Profit/Loss"]
+        .sum()
+    )
+    worst_day = float(daily.min())
+
+    dr     = _pd.date_range(daily.index.min(), daily.index.max(), freq="D")
+    equity = daily.reindex(dr, fill_value=0.0).cumsum()
+    total_eq = _dd_config.account_balance + equity
+    peak     = total_eq.cummax()
+    raw_dd   = float((peak - total_eq).max())
+
+    if (worst_day < -_dd_config.daily_loss_limit_usd or
+            raw_dd > _dd_config.total_drawdown_limit_usd):
+        return (combo, False, None)
+
+    scaled = rescale(combo, "equal", weights, portfolio, _dd_config)
+    vp     = validate(scaled, _dd_config)
+    return (combo, True, vp)
 
 
 # ── Step 3: Raw DD check (equal-weight scaled) ────────────────────────────────
@@ -68,47 +111,63 @@ def _raw_dd_filter(
     """
     import pandas as pd
 
+    from concurrent.futures import as_completed as _as_completed
+
     passed    : list[tuple] = []
     equal_vps : dict[tuple, ValidPortfolio] = {}
+    n_workers  = _resolve_workers(config.n_workers)
 
-    with tqdm(
-        combinations,
-        desc="  DD check (raw base-risk)",
-        unit="combo",
-        disable=not verbose,
-    ) as bar:
-        for combo in bar:
-            weights   = equal_weight(list(combo))
-            portfolio = build_weighted_portfolio(combo, strategies, weights)
+    if n_workers > 1:
+        from concurrent.futures import as_completed
+        with pool_executor(n_workers, _init_dd_workers, (strategies, config)) as pool:
+            futures = [pool.submit(_dd_worker, combo) for combo in combinations]
+            with tqdm(total=len(combinations), desc="  DD check (raw base-risk)",
+                      unit="combo", disable=not verbose) as bar:
+                for future in as_completed(futures):
+                    combo, ok, vp = future.result()
+                    if ok:
+                        passed.append(combo)
+                        equal_vps[combo] = vp
+                    else:
+                        stats.rejected_dd += 1
+                    bar.update(1)
+                    bar.set_postfix(passed=len(passed))
+    else:
+        with tqdm(
+            combinations,
+            desc="  DD check (raw base-risk)",
+            unit="combo",
+            disable=not verbose,
+        ) as bar:
+            for combo in bar:
+                weights   = equal_weight(list(combo))
+                portfolio = build_weighted_portfolio(combo, strategies, weights)
 
-            # ── Raw (unscaled) checks ──────────────────────────────────────
-            daily = (
-                portfolio
-                .groupby(portfolio["Close time"].dt.date)["Profit/Loss"]
-                .sum()
-            )
-            worst_day = float(daily.min())
+                daily = (
+                    portfolio
+                    .groupby(portfolio["Close time"].dt.date)["Profit/Loss"]
+                    .sum()
+                )
+                worst_day = float(daily.min())
 
-            # Build raw equity curve for DD
-            dr     = pd.date_range(daily.index.min(), daily.index.max(), freq="D")
-            equity = daily.reindex(dr, fill_value=0.0).cumsum()
-            total_eq = config.account_balance + equity
-            peak     = total_eq.cummax()
-            raw_dd   = float((peak - total_eq).max())
+                dr     = pd.date_range(daily.index.min(), daily.index.max(), freq="D")
+                equity = daily.reindex(dr, fill_value=0.0).cumsum()
+                total_eq = config.account_balance + equity
+                peak     = total_eq.cummax()
+                raw_dd   = float((peak - total_eq).max())
 
-            if (worst_day < -config.daily_loss_limit_usd or
-                    raw_dd > config.total_drawdown_limit_usd):
-                stats.rejected_dd += 1
+                if (worst_day < -config.daily_loss_limit_usd or
+                        raw_dd > config.total_drawdown_limit_usd):
+                    stats.rejected_dd += 1
+                    bar.set_postfix(passed=len(passed), tried=bar.n)
+                    continue
+
+                scaled = rescale(combo, "equal", weights, portfolio, config)
+                vp     = validate(scaled, config)
+
+                passed.append(combo)
+                equal_vps[combo] = vp
                 bar.set_postfix(passed=len(passed), tried=bar.n)
-                continue
-
-            # ── Pre-compute scaled equal-weight VP for ranking ─────────────
-            scaled = rescale(combo, "equal", weights, portfolio, config)
-            vp     = validate(scaled, config)   # always non-None now
-
-            passed.append(combo)
-            equal_vps[combo] = vp
-            bar.set_postfix(passed=len(passed), tried=bar.n)
 
     stats.passed_dd = len(passed)
 
