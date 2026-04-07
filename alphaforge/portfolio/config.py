@@ -11,13 +11,13 @@ from dataclasses import dataclass
 @dataclass
 class PortfolioConfig:
     # ── Account parameters ───────────────────────────────────────────────────
-    account_balance: float = 10_000.0
+    account_balance: float = 60_000.0
     daily_loss_limit_pct: float = 0.045       # 4%  → prop firm default is 5%
     total_drawdown_limit_pct: float = 0.09   # 9%  → prop firm default is 10%
-    base_risk_per_trade: float = 10.0       # $100/trade — matches backtest unit
+    base_risk_per_trade: float = 100.0       # $100/trade — matches backtest unit
 
     # ── Portfolio size ────────────────────────────────────────────────────────
-    min_strategies: int = 6
+    min_strategies: int = 10
     max_strategies: int = 15
 
     # ── Static correlation filter thresholds ─────────────────────────────────
