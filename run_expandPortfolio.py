@@ -57,6 +57,7 @@ from alphaforge.portfolio.stress.mae_stress import stress_test_all
 from alphaforge.portfolio.dashboard import run_portfolio_dashboard
 from alphaforge.portfolio.dashboard_corr import run_correlation_dashboard
 from alphaforge.portfolio.dashboard_mc import run_mc_dashboard
+from alphaforge.portfolio.exporter import export_all
 from alphaforge.paths import PORTFOLIOS_OUTPUT, STRATEGIES_APPROVED
 
 TRADING_DATA = STRATEGIES_APPROVED
@@ -320,6 +321,10 @@ def main() -> None:
     # ── Walk-forward equity ───────────────────────────────────────────────────
     print("  Computing walk-forward equity...")
     compute_all_wf_equities(results, all_strategies, config, verbose=True)
+
+    # ── Export report ─────────────────────────────────────────────────────────
+    print("  Exporting results...")
+    export_all(results, config, all_strategies, verbose=True)
 
     # ── Open dashboards ───────────────────────────────────────────────────────
     print(f"  Opening dashboards ({len(results)} combination(s))...")

@@ -196,12 +196,25 @@ def _pairwise_overlap(
 
     window_ns = np.timedelta64(int(window_hours * 3_600 * 1_000_000_000), "ns")
 
+    # Aliases: map broker-specific ticker variants to a canonical symbol name
+    _SYMBOL_ALIASES: dict[str, str] = {
+        "USA500": "US500",
+        "USATEC": "NAS100",
+    }
+
+    def _canonical(sym: str) -> str:
+        return _SYMBOL_ALIASES.get(sym, sym)
+
     # Pre-build per-symbol sorted open-time arrays per strategy
     symbol_times: dict[str, dict[str, np.ndarray]] = {}
     for name, df in strategies.items():
         st: dict[str, np.ndarray] = {}
         for symbol, grp in df.groupby("Symbol", sort=False):
-            st[symbol] = np.sort(grp["Open time"].values)
+            canon = _canonical(symbol)
+            if canon in st:
+                st[canon] = np.sort(np.concatenate([st[canon], grp["Open time"].values]))
+            else:
+                st[canon] = np.sort(grp["Open time"].values)
         symbol_times[name] = st
 
     for i in range(n):

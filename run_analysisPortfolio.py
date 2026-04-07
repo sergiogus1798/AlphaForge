@@ -41,6 +41,7 @@ from alphaforge.portfolio.generator.wf import compute_all_wf_equities
 from alphaforge.portfolio.dashboard import run_portfolio_dashboard
 from alphaforge.portfolio.dashboard_corr import run_correlation_dashboard
 from alphaforge.portfolio.dashboard_mc import run_mc_dashboard
+from alphaforge.portfolio.exporter import export_all
 from alphaforge.paths import PORTFOLIOS_OUTPUT
 
 
@@ -172,6 +173,10 @@ def main() -> None:
     # Walk-forward equity
     print("  Computing walk-forward equity...")
     compute_all_wf_equities(combinations, all_strategies, config, verbose=True)
+
+    # Export report
+    print("  Exporting results...")
+    export_all(combinations, config, all_strategies, verbose=True)
 
     # Dashboards
     print(f"  Opening dashboards ({len(combinations)} combination(s))...")

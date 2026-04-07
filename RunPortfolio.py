@@ -22,12 +22,6 @@ from alphaforge.portfolio.dashboard_corr import run_correlation_dashboard
 # ── Configuration ─────────────────────────────────────────────────────────────
 
 config = PortfolioConfig(
-    # Account
-    account_balance          = 10_000,
-    daily_loss_limit_pct     = 0.04,       # 4%
-    total_drawdown_limit_pct = 0.09,       # 9%
-    base_risk_per_trade      = 100.0,
-
     # Portfolio size
     min_strategies           = 3,
     max_strategies           = 10,

@@ -261,13 +261,12 @@ def rolling_correlation_filter(
     config: PortfolioConfig,
 ) -> bool:
     """
-    True (PASS) if rolling Pearson AND Spearman stay within thresholds across
-    all windows.
+    True (PASS) if rolling Pearson stays within thresholds across all windows.
 
     Rules:
-      - Every window: |pearson| <= max_rolling_corr AND |spearman| <= max_rolling_corr
+      - Every window: |pearson| <= max_rolling_corr
       - Windows whose end period falls within the last `recent_years` years:
-        |pearson| <= max_rolling_corr_recent AND |spearman| <= max_rolling_corr_recent
+        |pearson| <= max_rolling_corr_recent
 
     Windows with insufficient data are skipped.
     Returns True if no windows exist (not enough history).
@@ -287,7 +286,7 @@ def rolling_correlation_filter(
             if period > recent_cutoff
             else config.max_rolling_corr
         )
-        if abs(row["pearson"]) > threshold or abs(row["spearman"]) > threshold:
+        if abs(row["pearson"]) > threshold:
             return False
 
     return True

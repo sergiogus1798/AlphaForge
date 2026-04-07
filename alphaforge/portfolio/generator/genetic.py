@@ -335,6 +335,20 @@ def _score_population(population: list[Individual], config: PortfolioConfig) -> 
         ind.fitness = score_map.get(ind.combo, 0.0)
 
 
+def _absolute_fitness(ind: Individual, config: PortfolioConfig) -> float:
+    """
+    Absolute (non-normalised) weighted composite of the three fitness metrics.
+    Used for stagnation tracking so the score is consistent across generations,
+    unlike the population-normalised fitness which drifts as the pool changes.
+    """
+    m = ind.vp.metrics
+    return (
+        config.fitness_weight_return_dd      * m.get("return_dd_ratio",       0.0)
+        + config.fitness_weight_annual_return  * m.get("yearly_avg_pct_return", 0.0)
+        + config.fitness_weight_winning_months * m.get("winning_months_pct",    0.0)
+    )
+
+
 # ── Genetic operators ─────────────────────────────────────────────────────────
 
 def _tournament_select(
@@ -885,8 +899,8 @@ def run_genetic(
 
     names       = list(strategies.keys())
     elite_n     = max(1, int(len(population) * config.ga_elite_fraction))
-    best_fitness = population[0].fitness
-    stagnation   = 0
+    best_abs_fitness = _absolute_fitness(population[0], config)
+    stagnation       = 0
     seen_combos  : set[tuple] = {ind.combo for ind in population}
 
     if verbose:
@@ -972,10 +986,11 @@ def run_genetic(
                 f"  n={len(best_ind.combo)}"
             )
 
-        # Stagnation check
-        if current_best > best_fitness + 1e-6:
-            best_fitness = current_best
-            stagnation   = 0
+        # Stagnation check — absolute composite (R/DD + ret + win_mo), not normalized
+        current_abs_fitness = _absolute_fitness(population[0], config)
+        if current_abs_fitness > best_abs_fitness + 1e-6:
+            best_abs_fitness = current_abs_fitness
+            stagnation       = 0
         else:
             stagnation += 1
             if stagnation >= config.ga_max_stagnation:
